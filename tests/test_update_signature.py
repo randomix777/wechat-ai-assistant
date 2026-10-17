@@ -82,6 +82,18 @@ class VerifyTests(unittest.TestCase):
         text = sig.signature_text(signature).encode()
         self.assertTrue(sig.verify_manifest(manifest, text, public))
 
+    def test_the_manifest_may_arrive_as_text(self):
+        """JYI 工具中心那边的字段是 JSON 字符串，不是字节。
+
+        验签的对象必须还是原来那串字节 —— 换成 str 只该是多一层编码转换，
+        不能变成"把 str 的表示再签一遍"（那谁都验不过）。
+        """
+        public, manifest, signature, _ = self._signed()
+        text = manifest.decode("utf-8")
+        self.assertIsInstance(text, str)
+        self.assertTrue(sig.verify_manifest(text, sig.signature_text(signature), public))
+        self.assertFalse(sig.verify_manifest(text + " ", signature, public))
+
     def test_a_tampered_manifest_is_rejected(self):
         public, manifest, signature, _ = self._signed()
         tampered = manifest.replace("修好了几处".encode(), "换了份安装包".encode())

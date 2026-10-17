@@ -18,6 +18,7 @@ import unittest
 import unittest.mock
 import zipfile
 from pathlib import Path
+from urllib.parse import unquote
 
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT / "src"))
@@ -88,6 +89,13 @@ class CheckTests(unittest.TestCase):
         pin = unittest.mock.patch.object(sig, "PUBLISHER_PUBKEY", "")
         pin.start()
         self.addCleanup(pin.stop)
+        self._github_only()
+
+    def _github_only(self):
+        """关掉 JYI 那条路，这一组只测 GitHub 老路。"""
+        off = unittest.mock.patch.dict(os.environ, {updater.TOOLS_BASE_ENV: ""})
+        off.start()
+        self.addCleanup(off.stop)
 
     def _check(self, release, current="1.9.8"):
         with unittest.mock.patch.object(
@@ -131,6 +139,10 @@ class SignedReleaseTests(unittest.TestCase):
         pin = unittest.mock.patch.object(sig, "PUBLISHER_PUBKEY", self.public)
         pin.start()
         self.addCleanup(pin.stop)
+        # 这一组测的是"从 GitHub 拿到清单"这条路，JYI 那条在 JyiReleaseTests 里。
+        off = unittest.mock.patch.dict(os.environ, {updater.TOOLS_BASE_ENV: ""})
+        off.start()
+        self.addCleanup(off.stop)
 
     def _manifest(self, version="1.10.0", zip_url="https://cdn.example.com/app.zip",
                   sha256="ab" * 32, notes="签名版说明"):
@@ -206,6 +218,206 @@ class SignedReleaseTests(unittest.TestCase):
         blobs["https://example.com/latest.json.sig"] = blobs.pop(
             "https://example.com/" + sig.SIGNATURE_NAME)
         self.assertIsNotNone(self._check(release, blobs))
+
+
+@needs_cng
+class JyiReleaseTests(unittest.TestCase):
+    """JYI 工具中心那条路：先问工具中心，取不到/没签/验不过/不是新版，才退回 GitHub。
+
+    换下载入口不等于放宽信任：工具中心里的清单一样要过钉死的公钥，验不过就当
+    没有新版，不会因为"是本家域名"就装。
+    """
+
+    JYI = "https://jyi.test"
+    SLUG = "wechat-ai-assistant"
+
+    def setUp(self):
+        self.public, self.private = sig.generate_keypair()
+        pin = unittest.mock.patch.object(sig, "PUBLISHER_PUBKEY", self.public)
+        pin.start()
+        self.addCleanup(pin.stop)
+        env = unittest.mock.patch.dict(os.environ, {
+            updater.TOOLS_BASE_ENV: self.JYI, updater.TOOL_SLUG_ENV: self.SLUG})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def _download_url(self, platform="windows", arch="x64"):
+        return f"{self.JYI}/api/tools/{self.SLUG}/download?platform={platform}&arch={arch}"
+
+    def _manifest(self, version="1.10.0", zip_url=None, notes="工具中心上的说明",
+                  sha256="cd" * 32):
+        raw = sig.canonical_manifest(version=version, notes=notes,
+                                     zip_url=zip_url or self._download_url(),
+                                     sha256=sha256)
+        return raw, sig.signature_text(sig.sign_bytes(raw, self.private))
+
+    def _tool(self, version="1.10.0", notes="工具中心上的说明", asset_over=None,
+              manifest=True, signature=None, **tool_over):
+        """工具中心公开详情的返回体（``GET /api/tools/<slug>``）。"""
+        raw, good = self._manifest(version=version, notes=notes)
+        asset = {
+            "platform": "windows", "arch": "x64",
+            "filename": f"{updater.ASSET_PREFIX}{version}.zip", "sizeBytes": 4096,
+            "sha256": "cd" * 32, "signatureStatus": "signed", "signatureDetail": "",
+            "signedManifest": raw.decode("utf-8") if manifest else "",
+            "signature": signature if signature is not None else good,
+        }
+        asset.update(asset_over or {})
+        tool = {"slug": self.SLUG, "status": "published", "access": "free",
+                "downloadsPaused": False, "version": version, "releaseNotes": notes,
+                "assets": [asset]}
+        tool.update(tool_over)
+        return {"ok": True, "lang": "zh", "tool": tool}
+
+    def _check(self, payload=None, release=None, blobs=None, current="1.9.9"):
+        """payload=工具中心的详情（None=404）；release=GitHub 的 JSON（None=404）；
+        blobs 按 URL 给字节（GitHub 上的清单/签名文件）。"""
+        blobs = blobs or {}
+        calls: list[str] = []
+
+        def fetch_bytes(url, *a):
+            if url in blobs:
+                return blobs[url]
+            raise OSError("404 " + url)
+
+        def fetch_json(url, *a):
+            calls.append(url)
+            if "/api/tools/" in url:
+                if payload is None:
+                    raise OSError("404 " + url)
+                return payload
+            if release is None:
+                raise OSError("404 " + url)
+            return release
+
+        with unittest.mock.patch.object(updater, "_http_get_bytes", side_effect=fetch_bytes), \
+            unittest.mock.patch.object(updater, "_http_get_json", side_effect=fetch_json):
+            return updater.check_for_update("some/repo", current), calls
+
+    def _github_blobs(self, notes="GitHub 上的说明", version="1.10.0"):
+        release = _release(version)
+        raw, signature = self._manifest(version=version, notes=notes)
+        blobs = {_with_manifest(release): raw,
+                 "https://example.com/" + sig.SIGNATURE_NAME: signature.encode() + b"\n"}
+        return release, blobs
+
+    def test_the_tool_center_is_asked_first_and_decides(self):
+        info, calls = self._check(payload=self._tool())
+        self.assertIsNotNone(info)
+        assert info is not None
+        self.assertEqual(info["version"], "1.10.0")
+        self.assertEqual(info["sha256"], "cd" * 32)
+        self.assertEqual(info["notes"], "工具中心上的说明")
+        self.assertEqual(info["zip_url"], self._download_url(),
+                         "下载地址用的是清单里签过的那一个")
+        self.assertEqual([u for u in calls if "api.github.com" in u], [],
+                         "工具中心拿到了就别再打 GitHub（省一次限流名额）")
+
+    def test_the_github_copy_is_kept_as_a_fallback_url(self):
+        """工具中心的包地址挂了，同一版的 GitHub 附件还能兜一下。"""
+        info, _ = self._check(payload=self._tool())
+        assert info is not None
+        self.assertEqual(len(info["alt_urls"]), 1)
+        fallback = info["alt_urls"][0]
+        self.assertIn("github.com/randomix777/wechat-ai-assistant/releases/download/v1.10.0/",
+                      fallback)
+        self.assertTrue(fallback.endswith(".zip"), fallback)
+        self.assertEqual(unquote(fallback).rsplit("/", 1)[-1],
+                         f"{updater.ASSET_PREFIX}1.10.0.zip",
+                         "兜底地址就是这个版本的安装包，不用先问 GitHub API")
+
+    def test_a_version_without_a_signed_manifest_falls_back(self):
+        """工具中心里这版还没填签名清单（发布的人还没签）→ 当没有，去 GitHub 拿真清单。"""
+        release, blobs = self._github_blobs()
+        info, _ = self._check(payload=self._tool(manifest=False), release=release, blobs=blobs)
+        self.assertIsNotNone(info)
+        assert info is not None
+        self.assertEqual(info["notes"], "GitHub 上的说明")
+
+    def test_a_forged_signature_does_not_block_the_real_one(self):
+        """工具中心那份被换过签名 → 当它不存在，去 GitHub 拿真清单。"""
+        other = sig.generate_keypair()[1]
+        raw, _ = self._manifest()
+        forged = sig.signature_text(sig.sign_bytes(raw, other))
+        release, blobs = self._github_blobs()
+        info, _ = self._check(payload=self._tool(signature=forged), release=release, blobs=blobs)
+        self.assertIsNotNone(info)
+        assert info is not None
+        self.assertEqual(info["notes"], "GitHub 上的说明")
+
+    def test_a_tampered_manifest_in_the_tool_center_is_refused(self):
+        """清单被改过（签名还在）→ 验不过，当没有新版。"""
+        raw, signature = self._manifest()
+        tampered = raw.replace(self._download_url().encode(),
+                               b"https://evil.example.com/app.zip")
+        info, _ = self._check(payload=self._tool(asset_over={
+            "signedManifest": tampered.decode("utf-8"), "signature": signature}))
+        self.assertIsNone(info)
+
+    def test_the_tool_center_having_nothing_at_all_falls_back(self):
+        release, blobs = self._github_blobs()
+        info, _ = self._check(release=release, blobs=blobs)
+        self.assertIsNotNone(info)
+        assert info is not None
+        self.assertEqual(info["version"], "1.10.0")
+
+    def test_the_tool_center_holding_an_old_version_does_not_hide_a_newer_one(self):
+        """工具中心里还挂着当前版本（发布的人忘了传新版）时，GitHub 上的新版照样能查到。"""
+        release, blobs = self._github_blobs()
+        info, _ = self._check(payload=self._tool(version="1.9.9"),
+                              release=release, blobs=blobs)
+        self.assertIsNotNone(info)
+        assert info is not None
+        self.assertEqual(info["version"], "1.10.0")
+
+    def test_a_paused_download_is_not_an_update(self):
+        """后台把下载暂停了：连 GitHub 都不问，这次就不更新。"""
+        info, calls = self._check(payload=self._tool(downloadsPaused=True))
+        self.assertIsNone(info)
+        self.assertEqual([u for u in calls if "api.github.com" in u], [],
+                         "暂停下载时不该再去别处找同一个包")
+
+    def test_only_a_windows_asset_counts(self):
+        """工具中心只挂了 mac 的包 → 当没有新版（不猜别的平台）。"""
+        mac = self._tool(asset_over={"platform": "macos", "arch": "arm64"})
+        self.assertIsNone(self._check(payload=mac)[0])
+
+    def test_the_windows_x64_asset_wins_over_other_windows_arches(self):
+        """同一版挂了两个 Windows 架构：x64 优先，别把 arm64 的包装给商户。"""
+        payload = self._tool()
+        arm = dict(payload["tool"]["assets"][0])
+        arm.update({"arch": "arm64", "filename": f"{updater.ASSET_PREFIX}1.10.0-arm64.zip"})
+        payload["tool"]["assets"] = [arm] + payload["tool"]["assets"]
+        info, _ = self._check(payload=payload)
+        assert info is not None
+        self.assertEqual(info["zip_url"], self._download_url())
+
+    def test_empty_manifest_notes_fall_back_to_the_tool_page(self):
+        """清单里没写更新说明时，用工具中心那一版的说明。"""
+        raw, signature = self._manifest(notes="")
+        payload = self._tool(notes="工具中心页面上的说明",
+                             asset_over={"signedManifest": raw.decode("utf-8"),
+                                         "signature": signature})
+        info, _ = self._check(payload=payload)
+        assert info is not None
+        self.assertEqual(info["notes"], "工具中心页面上的说明")
+
+    def test_the_tools_base_can_be_turned_off_or_pointed_elsewhere(self):
+        with unittest.mock.patch.dict(os.environ, {updater.TOOLS_BASE_ENV: ""}):
+            self.assertEqual(updater.tools_base(), "", "空串=只用 GitHub")
+        with unittest.mock.patch.dict(os.environ, {updater.TOOLS_BASE_ENV: "https://self.test/r/"}):
+            self.assertEqual(updater.tools_base(), "https://self.test/r")
+        with unittest.mock.patch.dict(os.environ, {updater.TOOL_SLUG_ENV: ""}):
+            self.assertEqual(updater.tool_slug(), "", "工具名给空串也等于关掉这条路")
+        with unittest.mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(updater.TOOLS_BASE_ENV, None)
+            os.environ.pop(updater.TOOL_SLUG_ENV, None)
+            self.assertEqual(updater.tools_base(), updater.JYI_TOOLS_BASE)
+            self.assertEqual(updater.tool_slug(), updater.JYI_TOOL_SLUG)
+
+    def test_the_slug_is_asked_for_by_name(self):
+        _, calls = self._check(payload=self._tool())
+        self.assertEqual(calls, [f"{self.JYI}/api/tools/{self.SLUG}?lang=zh"])
 
 
 class StageTests(unittest.TestCase):

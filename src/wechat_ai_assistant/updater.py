@@ -1,11 +1,21 @@
-"""检查更新与静默更新：后台查 GitHub Releases，有新版就悄悄换掉。
+"""检查更新与静默更新：后台查新版，有新版就悄悄换掉。
+
+## 从哪儿查（顺序固定）
+
+1. 先在 **JYI 工具中心**读这个工具的公开详情（``/api/tools/<slug>``），从里面取
+   **签名清单**（发布者用私钥签的那段原始 JSON）与签名 —— 国内拉包快，
+   也没有 GitHub 那种匿名限流（60 次/时/IP）；
+2. JYI 那边取不到（没配、404、清单还没签、验签不过）就退回
+   **GitHub Releases** 的老路。
+
+两条路拿到的东西都必须过同一套签名校验 —— 换个下载入口不等于放宽信任。
 
 ## 流程（全自动，不弹窗）
 
-1. 界面起来以后在后台线程查 ``releases/latest``，有新版就下载（启动路径上
+1. 界面起来以后在后台线程查新版，有新版就下载（启动路径上
    不联网 —— 双击就该看见窗口，不能先等一个几十兆的下载）；
-2. 先验**签名清单**（``latest.json`` + ``latest.json.sig``，公钥钉在客户端里，
-   见 :mod:`wechat_ai_assistant.update_signature`），再比对包哈希，
+2. 先验**签名清单**（公钥钉在客户端里，见
+   :mod:`wechat_ai_assistant.update_signature`），再比对包哈希，
    两项都过不了直接扔掉，绝不安装；
 3. 解压到版本目录并写 ``pending.json``，界面顶栏留一句「下次打开自动更新」；
 4. 下次启动时起一个分离的更新脚本，等本进程退出后换目录、重启，
@@ -21,9 +31,10 @@ Windows 下运行中的 exe 和 DLL 全被锁死，原地覆盖必失败。
 
 * 版本号就是 Git tag 去掉开头的 ``v``，和 :mod:`wechat_ai_assistant.version` 一致；
 * 安装包叫 ``微信AI智能助理-win64-<版本>.zip``，内容是整个 onedir 目录；
-* 同名加 ``.sha256`` 放十六进制哈希（单个文件哈希，不是 checksum 列表）；
-* 每个版本还要放 ``latest.json`` + ``latest.json.sig``（``deploy/sign_release.py``
-  生成）—— 老客户端只认 ``.sha256``，所以过渡期两个都要传。
+* 安装包上传到 **JYI 工具中心**（``docs/release.md`` 的「上传」一节）；老客户端只认
+  GitHub 上同名加 ``.sha256`` 的十六进制哈希，所以过渡期两个都要有；
+* 每个版本还要在工具中心填上**签名清单 + 签名**（``deploy/sign_release.py``
+  生成的两样东西）—— 客户端就是从那儿读的；缺了就当没有新版。
 
 这里任何一步失败都只记日志、不抛异常 —— 更新永远不能挡住启动。
 """
@@ -51,6 +62,15 @@ LOGGER = logging.getLogger(__name__)
 #: 默认查这个仓库的 releases。换地方发版就改这里（或调用时传 repo）。
 DEFAULT_REPO = "randomix777/wechat-ai-assistant"
 API_LATEST = "https://api.github.com/repos/{repo}/releases/latest"
+
+#: JYI 工具中心（发布口）。客户端从这儿读**签名清单**，也从这儿下包 ——
+#: 国内拉 GitHub 的 70MB 又慢又被匿名限流。设成空串就只用 GitHub。
+JYI_TOOLS_BASE = "https://jyisolutions.com"
+#: 工具中心里这个工具的 slug（``<base>/api/tools/<slug>``）。
+JYI_TOOL_SLUG = "wechat-ai-assistant"
+#: 自建服务器/测试用：覆盖工具中心地址与工具名。空串 = 关掉这条路。
+TOOLS_BASE_ENV = "WECHAT_AI_TOOLS_BASE"
+TOOL_SLUG_ENV = "WECHAT_AI_TOOL_SLUG"
 
 #: 安装包名前缀。完整文件名形如 ``微信AI智能助理-win64-1.9.9.zip``。
 ASSET_PREFIX = "微信AI智能助理-win64-"
@@ -132,17 +152,108 @@ def _find_asset(assets: Any, name: str) -> str:
     return ""
 
 
-def check_for_update(repo: str = DEFAULT_REPO, current: str = "") -> dict[str, Any] | None:
-    """查最新 release。有新版返回 ``{version, notes, zip_url, sha256, alt_urls}``，
-    没有/查不到/任何异常都返回 None（调用方直接跳过）。
+def _env_or(env_name: str, default: str) -> str:
+    """环境变量认"显式设置"：设成空串是**关掉**这条路，不是"没设过"。"""
+    raw = os.environ.get(env_name)
+    if raw is None:
+        raw = default
+    return str(raw).strip()
 
-    有签名清单时**只认清单**：清单里写着这一版该装哪个包、哈希是多少，包地址
-    只是个下载入口。清单缺失或验不过，钉了公钥的客户端一律当作"没有新版" ——
-    宁可停在旧版，也不装一个来路不明的包。
+
+def tools_base() -> str:
+    """JYI 工具中心的地址（不含结尾斜杠）。空串 = 这条路关着。"""
+    return _env_or(TOOLS_BASE_ENV, JYI_TOOLS_BASE).rstrip("/")
+
+
+def tool_slug() -> str:
+    """工具中心里这个工具的 slug。空串 = 这条路关着。"""
+    return _env_or(TOOL_SLUG_ENV, JYI_TOOL_SLUG)
+
+
+class _DownloadPaused(Exception):
+    """工具中心明确说这一版暂停下载了。
+
+    这不是"没查到"，所以不能转 GitHub 找同一个包 —— 暂停多半就是因为这版有问题。
     """
-    current = current or current_version()
-    if not parse_version(current):
+
+
+def _windows_asset(assets: Any) -> Mapping[str, Any] | None:
+    """工具中心的资源列表里挑 Windows 的那条。挑不到返回 None。
+
+    优先 x64，其次任何 Windows 架构 —— 挑不到宁可当没有新版，也不猜一个别的平台。
+    """
+    windows: list[Mapping[str, Any]] = []
+    for asset in assets or []:
+        if not isinstance(asset, Mapping):
+            continue
+        if str(asset.get("platform") or "").strip().lower() != "windows":
+            continue
+        windows.append(asset)
+        if str(asset.get("arch") or "").strip().lower() in {"x64", "x86_64", "amd64"}:
+            return asset
+    return windows[0] if windows else None
+
+
+def _check_jyi(current: str) -> dict[str, Any] | None:
+    """从 JYI 工具中心读签名清单查新版。拿不到/验不过就返回 None（调用方转 GitHub）。
+
+    清单和签名都从工具中心下来，但**签名是私钥签的**：包放在哪个服务器上都不影响
+    "这版是不是我们自己发的"。所以这里验签不过就当没有新版，绝不因为"是本家的域名"
+    就放宽。清单里的哈希才是准的，工具中心报的版本号/哈希只当线索。
+    """
+    base, slug = tools_base(), tool_slug()
+    if not base or not slug:
         return None
+    from urllib.parse import quote
+    url = f"{base}/api/tools/{quote(slug, safe='')}?lang=zh"
+    try:
+        payload = _http_get_json(url)
+    except Exception as exc:
+        LOGGER.debug("JYI 工具中心没查到（%s），改问 GitHub", exc)
+        return None
+    tool = payload.get("tool") if isinstance(payload, Mapping) else None
+    if not isinstance(tool, Mapping):
+        return None
+    if tool.get("downloadsPaused"):
+        raise _DownloadPaused(str(tool.get("version") or ""))
+    asset = _windows_asset(tool.get("assets"))
+    if asset is None:
+        return None
+    manifest = asset.get("signedManifest")
+    signature = asset.get("signature")
+    if not manifest or not signature:
+        LOGGER.debug("工具中心里这版还没带签名清单，改问 GitHub")
+        return None
+    if not signing.verify_manifest(str(manifest), str(signature)):
+        LOGGER.warning("工具中心的签名清单没验过，当没有新版")
+        return None
+    parsed = signing.parse_manifest(str(manifest).encode("utf-8"))
+    if not parsed:
+        LOGGER.warning("工具中心的签名清单读不懂，当没有新版")
+        return None
+    version = str(parsed.get("version") or "")
+    if not is_newer(version, current):
+        return None
+    notes = str(parsed.get("notes") or "") or str(tool.get("releaseNotes") or "")
+    return {
+        "version": version,
+        "notes": notes,
+        "zip_url": str(parsed.get("zip_url") or ""),
+        "sha256": str(parsed.get("sha256") or ""),
+        # 清单里说的地址万一挂了，GitHub 上同一版还能兜一下。
+        "alt_urls": [_github_asset_url(version)],
+    }
+
+
+def _github_asset_url(version: str) -> str:
+    """按版本号拼出 GitHub 上的包地址（不用问 API，规则是固定的）。"""
+    from urllib.parse import quote
+    name = f"{ASSET_PREFIX}{str(version).lstrip('vV')}.zip"
+    return f"https://github.com/{DEFAULT_REPO}/releases/download/v{str(version).lstrip('vV')}/{quote(name, safe='')}"
+
+
+def _check_github(repo: str, current: str) -> dict[str, Any] | None:
+    """老路：GitHub 的 ``releases/latest``。"""
     try:
         release = _http_get_json(API_LATEST.format(repo=repo))
     except Exception as exc:
@@ -153,10 +264,34 @@ def check_for_update(repo: str = DEFAULT_REPO, current: str = "") -> dict[str, A
     version = str(release.get("tag_name") or release.get("name") or "")
     if not is_newer(version, current):
         return None
-    if version_is_blocked(version.lstrip("vV")):
+    return _release_info(release, version, current)
+
+
+def check_for_update(repo: str = DEFAULT_REPO, current: str = "") -> dict[str, Any] | None:
+    """查最新版。有新版返回 ``{version, notes, zip_url, sha256, alt_urls}``，
+    没有/查不到/任何异常都返回 None（调用方直接跳过）。
+
+    先问 JYI 工具中心，再问 GitHub。两条路的清单都**只认签名**：清单里写着这一版
+    该装哪个包、哈希是多少，包地址只是个下载入口。清单缺失或验不过，钉了公钥
+    的客户端一律当作"没有新版" —— 宁可停在旧版，也不装一个来路不明的包。
+    """
+    current = current or current_version()
+    if not parse_version(current):
+        return None
+    try:
+        info = _check_jyi(current)
+    except _DownloadPaused as paused:
+        LOGGER.info("工具中心把 %s 的下载暂停了，这次不更新", paused)
+        return None
+    if info is None:
+        info = _check_github(repo, current)
+    if info is None:
+        return None
+    version = str(info.get("version") or "").lstrip("vV")
+    if version_is_blocked(version):
         LOGGER.info("版本 %s 之前换上去没起来，这次跳过（不重下）", version)
         return None
-    return _release_info(release, version, current)
+    return info
 
 
 def blocked_marker(version: str, base: Path | None = None) -> Path:

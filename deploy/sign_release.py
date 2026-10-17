@@ -12,7 +12,10 @@
     :: 每个版本：签安装包，产出 latest.json + latest.json.sig
     python deploy/sign_release.py sign 微信AI智能助理-win64-1.10.0.zip --notes-file notes.md
 
-    :: 上传前自检（用客户端那把钉死的公钥验一遍）
+    签出来的清单里，下载地址默认就是 **JYI 工具中心里这个工具的稳定下载地址**
+    （工具中心换版不用重签，客户端会拿清单里的 sha256 把字节对上）。
+
+    :: 自检（用客户端那把钉死的公钥验一遍）
     python deploy/sign_release.py verify latest.json --sig latest.json.sig
 
 私钥不放在发版机器上时（私钥在 JYI worker 里，见 ``docs/release.md`` §4），
@@ -24,7 +27,7 @@
 
     :: 每次发版：让在线签名服务签（本机不需要私钥文件）
     python deploy/sign_release.py sign 微信AI智能助理-win64-1.10.0.zip \\
-      --remote https://ai.jyisolutions.com/api/internal/release/sign
+      --remote https://jyisolutions.com/api/internal/release/sign
 
 完整发版流程见 ``docs/release.md``。
 
@@ -61,6 +64,17 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(4 * 1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _tool_download_url() -> str:
+    """JYI 工具中心里这个安装包的稳定下载地址（不带版本号）。
+
+    清单里签的就是这个地址，所以工具中心换版不用重签 —— 客户端下到别的字节会
+    被清单里的 sha256 挡住（fail-closed）。
+    """
+    base = updater.tools_base() or updater.JYI_TOOLS_BASE
+    slug = updater.tool_slug() or updater.JYI_TOOL_SLUG
+    return f"{base}/api/tools/{quote(slug, safe='')}/download?platform=windows&arch=x64"
 
 
 def _version_from_name(name: str) -> str:
@@ -286,9 +300,7 @@ def cmd_sign(args: argparse.Namespace) -> int:
         notes = Path(args.notes_file).expanduser().read_text(encoding="utf-8").strip()
     digest = _sha256_file(zip_path)
     name = zip_path.name
-    url = args.url or (
-        f"https://github.com/{updater.DEFAULT_REPO}/releases/download/v{version}/"
-        f"{quote(name, safe='')}")
+    url = args.url or _tool_download_url()
     released_at = args.released_at or _datetime.datetime.now(
         _datetime.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     manifest = signing.canonical_manifest(version, url, digest, notes, released_at)
@@ -312,11 +324,12 @@ def cmd_sign(args: argparse.Namespace) -> int:
     print(f"清单：{manifest_path}")
     print(f"签名：{signature_path}")
     print()
-    print("上传到 release 的资源（四个都要）：")
-    print(f"  1. {name}")
-    print(f"  2. {name}.sha256        <- 过渡期保留：老客户端只认这个")
-    print(f"  3. {signing.MANIFEST_NAME}")
-    print(f"  4. {signing.SIGNATURE_NAME}")
+    print("接下来（见 docs/release.md）：")
+    print(f"  1. 把 {name} 传到 JYI 工具中心：管理后台 → 工具 → 微信 AI 助手 → 上传新版本")
+    print("  2. 把下面两段填进这一版的「签名清单」「签名」字段（缺了客户端就当没有新版）：")
+    print(f"       签名清单 = {manifest_path} 的内容")
+    print(f"       签名     = {signature_path} 的内容")
+    print(f"  3. 老客户端只认 GitHub：过渡期仍要把 {name} 和 {name}.sha256 传到 release")
     print()
     print(f"发版前自检：python deploy/sign_release.py verify \"{manifest_path}\" "
           f"--sig \"{signature_path}\"")
@@ -365,7 +378,8 @@ def build_parser() -> argparse.ArgumentParser:
     sign = sub.add_parser("sign", help="签安装包，产出 latest.json + latest.json.sig")
     sign.add_argument("zip", help="安装包路径")
     sign.add_argument("--version", default="", help="版本号（默认从文件名/version.py 推）")
-    sign.add_argument("--url", default="", help="下载地址（默认按 GitHub release 拼）")
+    sign.add_argument("--url", default="",
+                      help="下载地址（默认用 JYI 工具中心里这个工具的稳定下载地址）")
     sign.add_argument("--notes", default="", help="更新说明（一行）")
     sign.add_argument("--notes-file", default="", help="更新说明文件")
     sign.add_argument("--released-at", default="", help="发布时间（默认现在，UTC）")

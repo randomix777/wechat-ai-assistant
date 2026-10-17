@@ -234,7 +234,15 @@ def _coerce_signature(signature: bytes) -> bytes | None:
 
 def verify_manifest(manifest: bytes, signature: bytes,
                     public_key_hex: str = "") -> bool:
-    """清单字节 + 签名 → 是不是这把公钥签的。任何异常都返回 False。"""
+    """清单字节 + 签名 → 是不是这把公钥签的。任何异常都返回 False。
+
+    ``manifest`` / ``signature`` 给 ``str`` 也认（按 UTF-8 当文本处理）：工具中心的
+    接口返回的就是 JSON 字符串，调用方不该为这点小事自己编码。
+    """
+    if isinstance(manifest, str):
+        manifest = manifest.encode("utf-8")
+    if isinstance(signature, str):
+        signature = signature.encode("utf-8")
     key_hex = str(public_key_hex or "").strip().lower() or pinned_key_hex()
     if not manifest or not signature or not key_hex:
         return False

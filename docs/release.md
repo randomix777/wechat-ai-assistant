@@ -1,6 +1,9 @@
-# 发版流程：打 tag → 出包 → 传 Release → 客户端静默更新
+# 发版流程：出包 → 传 JYI 工具中心 → 客户端静默更新
 
-客户端的自动更新只认 GitHub Releases（见 `src/wechat_ai_assistant/updater.py`），
+客户端的自动更新**先问 JYI 工具中心**（`https://jyisolutions.com/api/tools/wechat-ai-assistant`，
+见 `src/wechat_ai_assistant/updater.py` 的 `_check_jyi`），问不到才回落到 GitHub Releases。
+两条路下到的包都要过同一套签名校验，所以换下载入口不等于放宽信任。
+
 约定的每一条都必须做到，否则客户端会静默跳过（不报错、不安装）。
 
 ## 1. 改版本号（必须一致）
@@ -78,24 +81,29 @@ Compress-Archive -Path "dist\微信AI智能助理" `
   **所有已发出的客户端从此拒收更新**，要换就跟着发一次装机包。
 * 签名/验签都走 Windows 自带的 CNG（`bcrypt.dll`）做 ECDSA P-256，不引入新依赖。
 * 清单 `latest.json` 里有 `version` / `zip_url` / `sha256` / `notes` / `released_at`。
-  客户端**先验清单签名**，信不过就整个跳过（不下载、不安装）。
-* 缺清单、签名不对、清单版本与 Release 对不上 → 一律拒绝更新。**所以漏了这一步，
-  新客户端收不到这次更新**（老客户端仍然照 `.sha256` 走）。
+  `zip_url` 默认就是工具中心里这个工具的**稳定下载地址**（不带版本号），客户端**先验清单签名**，
+  信不过就整个跳过（不下载、不安装），验过了再按清单里的哈希校验下到的包。
+* 缺清单、签名不对、清单版本对不上（GitHub 那条路会拿 tag 比，工具中心那条路拿工具当前版本比）
+  → 一律拒绝更新。**所以漏了这一步，新客户端收不到这次更新**（老客户端仍然照 `.sha256` 走）。
+* 想临时改渠道（测试用）：`WECHAT_AI_TOOLS_BASE` 换域名、`WECHAT_AI_TOOL_SLUG` 换工具；
+  把 `WECHAT_AI_TOOLS_BASE` 设成空串就跳过工具中心、只走 GitHub。
 
 ### 4.1 私钥只存在 worker 里（在线签名服务）
 
-不想让私钥留在发版机器上时，把它交给 JYI worker（`worker/release-sign.ts`，
-两个 secret：`RELEASE_SIGN_JWK` = 私钥的 JWK，`RELEASE_SIGN_TOKEN` = 进门口令）：
+不想让私钥留在发版机器上时，把它交给 JYI 平台 worker（`apps/platform` 的
+`app/api/internal/release/sign/route.ts`，两个 secret：`RELEASE_SIGN_JWK` = 私钥的 JWK，
+`RELEASE_SIGN_TOKEN` = 进门口令）。签名路由挂在有域名的 worker 上（`jyisolutions.com`），
+不在根 `jyi` worker 里——根 worker 没有 route，挂上去也没人访问得到。
 
 ```powershell
-# 一次性：把私钥转成 WebCrypto 的 JWK 喂给 worker（在拿到私钥的那台机器上跑一次）
+# 一次性：把私钥转成 WebCrypto 的 JWK 喂给平台 worker（在拿到私钥的那台机器上跑一次）
 .\.venv\Scripts\python.exe deploy\sign_release.py export-jwk |
-  npx wrangler secret put RELEASE_SIGN_JWK
+  npx wrangler secret put RELEASE_SIGN_JWK --config apps\platform\wrangler.jsonc
 
 # 每次发版：清单仍在本机生成，只把清单字节发给签名路由，签名拿回来本机先验一遍
 $env:RELEASE_SIGN_TOKEN = "<自己生成的长随机串>"
 .\.venv\Scripts\python.exe deploy\sign_release.py sign "微信AI智能助理-win64-$ver.zip" `
-  --version $ver --remote https://ai.jyisolutions.com/api/internal/release/sign
+  --version $ver --remote https://jyisolutions.com/api/internal/release/sign
 ```
 
 * 信任根没变：客户端认的还是源码里钉死的 `PUBLISHER_PUBKEY`。签名服务自称的公钥与它不一致、
@@ -105,26 +113,43 @@ $env:RELEASE_SIGN_TOKEN = "<自己生成的长随机串>"
 * 两端算法一致性已做过互通性自检：Node/WebCrypto 签 → Python/CNG 验通过（ECDSA P-256 +
   SHA-256 + raw `r||s`）。
 
-## 5. 发 Release
+## 5. 发布到 JYI 工具中心（主渠道）
+
+工具中心是主渠道：国内直连、没有匿名限流，而且清单和签名跟包放在同一个地方。
+**这个工具必须设成「免费」**——客户端用的是产品自己的 JYI 凭据（`jyi_client.py` 那套
+`api_key`/`device_token`），不是平台 OAuth，取不到「需授权」工具的下载。
+
+1. 管理后台 → 工具 → 微信 AI 助手 → 上传新版本：填版本号、上传 `微信AI智能助理-win64-<版本>.zip`；
+2. 同一版的两个字段里粘上签名（就是 `sign` 命令产出的那两个文件的内容）：
+   * **签名清单** = `dist\latest.json`
+   * **签名** = `dist\latest.json.sig`
+3. 把工具设成「免费」，确认 `downloadsPaused` 是关的。
+
+客户端只看**清单里**的 `zip_url`/`sha256`：清单验过就用清单里的下载地址，清单里的哈希对不上
+就当作没更新（工具中心换版不用重签，地址是稳定的；但**每次换包都必须重签一次清单**，
+否则哈希对不上，客户端会一直跳过这一版）。
+
+### 5.1 GitHub Release（过渡期，给老客户端）
+
+1.9.9 及以前的客户端只认 GitHub，所以过渡期仍要发一次：
 
 1. `git tag v<版本>` 并推送；
-2. 在 GitHub 建 Release（tag 同名），上传四个文件：
-   `.zip`、`.zip.sha256`、`latest.json`、`latest.json.sig`；
-3. Release 正文写人话（修了什么、要不要立即更新）——名单里没有正文时，客户端就用
-   `latest.json` 的 `notes` 当更新说明。
+2. 在 GitHub 建 Release（tag 同名），上传 `.zip`、`.zip.sha256`、`latest.json`、`latest.json.sig`；
+3. Release 正文写人话（修了什么、要不要立即更新）。
 
 仓库默认查 `randomix777/wechat-ai-assistant` 的 releases，换地方发版要同步改
 `src/wechat_ai_assistant/updater.py` 的 `DEFAULT_REPO`。
+清单里没有 `notes` 时，客户端就用工具中心那一版的发布说明（再退到 GitHub 正文）。
 
 ## 6. 生效与回滚
 
 * 检查更新在**界面起来之后**才在后台做（不再卡启动）：有新版就安静下载、校验、暂存到
   `_updates/`，顶栏提示「新版 vX 已就绪，下次打开自动更新」；换版发生在**下一次启动**。
-* 无新版、网络不可用、GitHub 限流、下载或校验失败 → 照常打开当前版本，不打扰用户。
+* 无新版、网络不可用、工具中心或 GitHub 限流、下载或校验失败 → 照常打开当前版本，不打扰用户。
 * 换版流程：等旧进程退出 → 新版目录搬进来 → 起新版等 15 秒还活着就算成（删备份）→
   起不来就整块换回旧版。便携 `data/` 会并进新版（按内容合并，不会嵌成 `data\data`）。
 * 换版脚本每一步都写日志到 `%TEMP%\pyw-apply-<版本>.log`，商户机器上没换成功就看它；
-  出大问题：删掉 Release（或删掉 asset），客户端查不到就地不动；
+  出大问题：把工具中心那一版下线（或删掉 Release / 把工具设成暂停下载），客户端查不到就地不动；
   已暂存但还没应用的，让商户删掉 `_updates/` 和 `pending.json` 即可。
 
 ## 7. 换版演练（改过换版脚本就必须跑一次）
