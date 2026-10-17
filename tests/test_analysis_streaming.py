@@ -1,4 +1,10 @@
-"""Regression coverage for reasoning exhausting JYI's budget before final text."""
+"""JYI 流式分析的请求契约：默认模型直答，续写与降级沿用同一套参数。
+
+这组用例出身于"隐藏推理把输出预算吃光、正文一个字都没出来"那次故障。
+现在的设计是默认文本模型**关掉**隐藏推理（先出正文，不让商户干等），
+但契约没变：正文能流式拿到、推理内容不许混进结果、续写与非流式降级
+必须带着同一套请求参数、图片拒绝要与本地解密失败区分开。
+"""
 from __future__ import annotations
 
 import io
@@ -66,12 +72,14 @@ class AnalysisStreamingTests(unittest.TestCase):
         self.assertEqual(report, "订单分析正文")
         self.assertEqual("".join(chunks), report)
         body = opener.bodies()[0]
-        self.assertEqual(body["thinking"], {"type": "enabled"})
-        self.assertEqual(body["reasoning_effort"], "max")
+        # 默认文本模型直答：显式关掉 thinking，也不带 reasoning_effort。
+        # 见 _complete_summary_prompt 里 DEFAULT_TEXT_MODEL 那个分支。
+        self.assertEqual(body["thinking"], {"type": "disabled"})
+        self.assertNotIn("reasoning_effort", body)
         self.assertEqual(body["temperature"], 1.0)
         self.assertEqual(body["max_tokens"], 131072)
 
-    def test_images_use_the_same_endpoint_model_and_maximum_reasoning(self):
+    def test_images_use_the_same_endpoint_model_and_request_settings(self):
         from PIL import Image
 
         opener = Opener(completion("文字分析"), completion("图片分析"))
@@ -90,13 +98,12 @@ class AnalysisStreamingTests(unittest.TestCase):
                          {"https://gateway.jyisolutions.com/v1/chat/completions"})
         for body in opener.bodies():
             self.assertEqual(body["model"], "jyi-default")
-            self.assertEqual(body["thinking"], {"type": "enabled"})
-            self.assertEqual(body["reasoning_effort"], "max")
+            self.assertEqual(body["thinking"], {"type": "disabled"})
         parts = opener.bodies()[1]["messages"][-1]["content"]
         image = next(part for part in parts if part["type"] == "image_url")
         self.assertTrue(image["image_url"]["url"].startswith("data:image/webp;base64,"))
 
-    def test_continuations_keep_the_same_reasoning_settings(self):
+    def test_continuations_keep_the_same_request_settings(self):
         opener = Opener(completion("第一部分", finish="length"), completion("第二部分"))
         with patch("wechat_ai_assistant.client_login.build_opener", return_value=opener):
             report = _complete_summary_prompt(
@@ -105,10 +112,10 @@ class AnalysisStreamingTests(unittest.TestCase):
         self.assertIn("第二部分", report)
         self.assertEqual(len(opener.requests), 2)
         for body in opener.bodies():
-            self.assertEqual(body["reasoning_effort"], "max")
-            self.assertEqual(body["thinking"]["type"], "enabled")
+            self.assertEqual(body["thinking"], {"type": "disabled"})
+            self.assertNotIn("reasoning_effort", body)
 
-    def test_non_streaming_fallback_keeps_the_same_reasoning_settings(self):
+    def test_non_streaming_fallback_keeps_the_same_request_settings(self):
         body = {"choices": [{"message": {"content": "完整正文"}, "finish_reason": "stop"}]}
         opener = Opener(completion(""), json.dumps(body).encode())
         with patch("wechat_ai_assistant.client_login.build_opener", return_value=opener):
@@ -118,7 +125,7 @@ class AnalysisStreamingTests(unittest.TestCase):
         self.assertEqual(len(opener.requests), 2)
         self.assertTrue(opener.bodies()[0]["stream"])
         self.assertNotIn("stream", opener.bodies()[1])
-        self.assertEqual(opener.bodies()[1]["thinking"], {"type": "enabled"})
+        self.assertEqual(opener.bodies()[1]["thinking"], {"type": "disabled"})
 
     def test_reasoning_only_length_failure_does_not_retry_or_split(self):
         opener = Opener(completion("", finish="length", reasoning="持续推理"))
@@ -163,14 +170,29 @@ class AnalysisStreamingTests(unittest.TestCase):
         self.assertEqual(stats[0]["response_model"], "deepseek-v4.1-flash")
         self.assertEqual(stats[0]["gateway_request_id"], "gwr_test_diagnostics")
 
-    def test_model_capacity_reserves_room_for_maximum_reasoning(self):
+    def test_model_capacity_clips_the_output_and_input_budgets(self):
+        from wechat_ai_assistant.jyi_parse import SUMMARY_MAX_OUTPUT_TOKENS
+        from wechat_ai_assistant.summary_task import SUMMARY_CHUNK_TARGET_TOKENS
+
         app = types.SimpleNamespace(model_catalog={"models": [{
             "alias": "jyi-default", "context_window": 1_000_000,
             "max_output_tokens": 384000,
         }]})
         output, input_budget = _jyi_model_limits(app, "jyi-default")
-        self.assertEqual(output, 131072)
-        self.assertEqual(input_budget, 20000)
+        # 上游允许的输出上限再大也不越过本地常量；输入预算封顶在分批目标值。
+        self.assertEqual(output, SUMMARY_MAX_OUTPUT_TOKENS)
+        self.assertEqual(input_budget, SUMMARY_CHUNK_TARGET_TOKENS)
+        self.assertLess(output + input_budget, 1_000_000, "两者相加不能超过上下文窗口")
+
+        # 上下文小的模型：输出与输入都必须被余量裁掉，不能只信上游声明。
+        small = types.SimpleNamespace(model_catalog={"models": [{
+            "alias": "jyi-default", "context_window": 65536,
+            "max_output_tokens": 8192,
+        }]})
+        output, input_budget = _jyi_model_limits(small, "jyi-default")
+        self.assertEqual(output, 8192, "上游的输出上限小于本地常量时听上游的")
+        self.assertIsNotNone(input_budget)
+        self.assertLessEqual(output + int(input_budget), 65536)
 
     def test_gateway_image_rejection_is_distinct_from_decryption_failure(self):
         from PIL import Image

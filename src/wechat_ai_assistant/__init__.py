@@ -9,8 +9,17 @@ from importlib import import_module
 from typing import Any
 
 from .compat import import_legacy_environment
+from ._packages import ensure_packages_on_path
 
 import_legacy_environment()
+
+#: 源码树里 ``packages/*`` 是纯源码，不进 venv。**必须在任何子模块之前**挂上
+#: ``sys.path``：以前只有 opencode/integration/receipts/service 这几个模块自己
+#: 调，于是谁先被导入谁定局 —— 而 ``orders`` 在 import 时就把契约读成了
+#: 「降级兜底」那一份空 schema，并且**整个进程**都跟着用那一份。表现就是
+#: 全量套件里几十个 "parse result does not match the required schema"
+#: （按字母序第一个踩到的模块污染后面所有模块），单跑那个模块却是绿的。
+ensure_packages_on_path()
 
 _EXPORTS = {
     "AutoReply": ".WeChatAuto", "Collections": ".WeChatAuto", "Call": ".WeChatAuto",

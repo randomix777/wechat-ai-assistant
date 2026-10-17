@@ -142,12 +142,13 @@ def build_summary_messages(messages: list[dict[str, Any]], *,
     """摘要的提示包：系统提示词 + 按时间排列的文字和图片。"""
     from .summary import SUMMARY_SYSTEM_PROMPT
 
-    return [
+    prompt = [
         {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
         {"role": "user", "content": _analysis_user_content(
             messages, "请分析以下本次读取的消息：" if include_images else "",
             include_images=include_images)},
     ]
+    return add_document_text(prompt, messages)
 
 
 def add_image_parts(prompt_messages: list[dict[str, Any]],
@@ -262,12 +263,13 @@ def build_role_analysis_messages(messages: list[dict[str, Any]], role_id: str, *
                                  include_images: bool = False) -> list[dict[str, Any]]:
     """Build role-directed instructions and the current text/image batch."""
     from .roles import analysis_instruction
-    return [
+    prompt = [
         {"role": "system", "content": analysis_instruction(role_id)},
         {"role": "user", "content": _analysis_user_content(
             messages, "请按系统要求分析以下本次读取的消息：",
             include_images=include_images)},
     ]
+    return add_document_text(prompt, messages)
 
 
 def build_order_report_merge_messages(reports: list[str]) -> list[dict[str, Any]]:

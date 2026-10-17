@@ -1391,6 +1391,10 @@ class MerchantApplication:
         self.stop()
         self.outbox.close()
         self.cursor.close()
+        # merge.db 也是 sqlite 连接。以前这里漏了 merger，于是 Windows 上
+        # 临时目录删不掉：测试在 tearDown 报 WinError 32「文件被另一个进程占用」，
+        # 而真正漏掉的地方是这儿 —— 报错指向的是清理，不是没关的句柄。
+        self.merger.close()
 
 
 __all__ = ["AppEvents", "MerchantApplication", "POLL_INTERVAL_SECONDS"]

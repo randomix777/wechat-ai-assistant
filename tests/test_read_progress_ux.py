@@ -24,6 +24,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -34,6 +35,11 @@ from wechat_ai_assistant.application import AppEvents, MerchantApplication  # no
 from wechat_ai_assistant.wizard import WizardStep  # noqa: E402
 
 GROUP = "鲜果批发群"
+
+
+def _hours_ago(hours: int) -> str:
+    """最近 N 小时前的时间戳，格式与微信导出的一致。"""
+    return (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M")
 
 
 def build_app(tmp_path, history_reader_fn):
@@ -58,15 +64,18 @@ def build_app(tmp_path, history_reader_fn):
 
 
 def rows():
+    # 日期必须相对「现在」算：读取范围预设是「最近 1 天 / 7 天」，
+    # 写死的 "2026-10-2" 一旦过期，读取就合法地返回 0 条，
+    # 于是「读完要报进度」这组测试变成每天都会红的定时炸弹。
     return {
         GROUP: [
             {"消息发送人": "张姐", "消息内容": f"苹果{i}箱", "消息类型": "文本",
-             "消息发送时间": f"2026-10-2 1{i}:1{i}"}
+             "消息发送时间": _hours_ago(30 + i * 3)}
             for i in range(12)
         ],
         "社区团购": [
             {"消息发送人": "李女士", "消息内容": "香蕉五箱", "消息类型": "文本",
-             "消息发送时间": "2026-10-2 09:01"},
+             "消息发送时间": _hours_ago(20)},
         ],
     }
 
@@ -296,9 +305,15 @@ class EmptyReadHonestyTests(unittest.TestCase):
         self.assertNotEqual(self._render(0, [0]), self._render(0, [7]))
 
     def test_it_tells_the_merchant_what_to_do(self):
-        """光说事实不够，得给出下一步。"""
+        """光说事实不够，得给出下一步。
+
+        下一版文案把「再点一次」换成了明确的去处：回上一步改范围重读，
+        或者改用「读取全部历史」。断言钉住的是**给没给下一步**这件事，
+        所以跟着文案一起改，别让它变成一句空话。
+        """
         text = self._render(0, [7])
-        self.assertIn("再点一次", text)
+        self.assertIn("上一步", text)
+        self.assertIn("可重新读取", text)
 
 
 if __name__ == "__main__":

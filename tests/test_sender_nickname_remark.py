@@ -194,13 +194,16 @@ class AvatarClickPointTests(unittest.TestCase):
     def test_dpi_scaling_is_applied(self):
         from PIL import Image
 
+        # 截图 50x50、控件 100x100 ⇒ 缩放 2。像素团取 20x20（隔 2 采样有
+        # 100 个命中点，过得了"这是头像不是噪点"的门槛），中心在图上
+        # 10+20/2 = 20，乘 2 就是屏幕上的 40。
         img = Image.new("RGB", (50, 50), (250, 250, 250))
-        for x in range(10, 20):
-            for y in range(10, 20):
+        for x in range(10, 30):
+            for y in range(10, 30):
                 img.putpixel((x, y), (30, 30, 200))
         got = avatar_click_point(
             self._item_with_image(img, left=100, top=200, right=200, bottom=300))
-        self.assertEqual(got, (100 + 14 * 2, 200 + 14 * 2))
+        self.assertEqual(got, (100 + 20 * 2, 200 + 20 * 2))
 
     def test_content_below_avatar_zone_is_ignored(self):
         """长图的下半部分再花哨也不能被当成头像。”
@@ -262,7 +265,10 @@ class AvatarResolveGuardsTests(unittest.TestCase):
 
         def rectangle(self):
             from types import SimpleNamespace
-            return SimpleNamespace(left=100, top=200, right=200, bottom=300)
+            # 占满整行的那一档（bubble_side 判 middle）：自己的靠右气泡走
+            # side == "right" 那条路，根本不截图；这里要验的正是"分不清时
+            # 回落像素判断"的那道守卫，所以造一条整行的气泡。
+            return SimpleNamespace(left=60, top=200, right=840, bottom=300)
 
         @property
         def element_info(self):

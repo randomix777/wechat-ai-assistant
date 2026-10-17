@@ -748,6 +748,29 @@ def _prepare_document_segments(message: Mapping[str, Any],
     return "", []
 
 
+def _document_batches(messages: list[dict[str, Any]],
+                      max_document_chars: int) -> list[tuple[str, list[dict[str, Any]]]]:
+    """把每个文件消息拆成有界的 ``DOCX/PDF 文档`` 批次。
+
+    正文在本地抽一次，预置进 ``_analysis_document_text`` 交给
+    ``add_document_text`` 复用（不再读第二次盘）；一段一批，超长文档分成
+    几批，任何一批都不会把整份正文重复塞进上下文。
+    """
+    batches: list[tuple[str, list[dict[str, Any]]]] = []
+    for message in messages:
+        if str(message.get("kind") or "").lower() != "file":
+            continue
+        name, segments = _prepare_document_segments(message, max_document_chars)
+        for index, segment in enumerate(segments, start=1):
+            item = dict(message)
+            item["_analysis_document_text"] = segment
+            item["_analysis_document_name"] = name
+            if len(segments) > 1:
+                item["_analysis_document_part"] = f"{index}/{len(segments)}"
+            batches.append(("DOCX/PDF 文档", [item]))
+    return batches
+
+
 def _summary_work_batches(messages: list[dict[str, Any]], *, token_budget: int,
                            max_document_chars: int,
                            include_images: bool = True,
@@ -763,12 +786,13 @@ def _summary_work_batches(messages: list[dict[str, Any]], *, token_budget: int,
             elif kind not in {"audio", "voice", "video", "file"} and str(
                     message.get("content") or "").strip():
                 mixed.append(dict(message))
-        return [("多模态", chunk) for chunk in _summary_chunks(
+        return ([("多模态", chunk) for chunk in _summary_chunks(
             mixed, token_budget=token_budget,
             max_document_chars=max_document_chars,
             max_images=SUMMARY_MULTIMODAL_MAX_IMAGES,
             max_image_bytes=SUMMARY_MULTIMODAL_MAX_IMAGE_BYTES,
             image_size_estimate=SUMMARY_MULTIMODAL_IMAGE_ESTIMATE_BYTES)]
+            + _document_batches(messages, max_document_chars))
 
     texts = _text_analysis_messages(messages)
     batches = [("纯文字", chunk) for chunk in _summary_chunks(
@@ -780,6 +804,7 @@ def _summary_work_batches(messages: list[dict[str, Any]], *, token_budget: int,
         batches.extend(("图片", chunk) for chunk in _summary_chunks(
             images, token_budget=token_budget,
             max_document_chars=max_document_chars))
+    batches.extend(_document_batches(messages, max_document_chars))
     return batches
 
 
@@ -789,6 +814,28 @@ def _text_analysis_messages(messages: list[dict[str, Any]]) -> list[dict[str, An
     return [dict(message) for message in messages
             if str(message.get("kind", "text") or "text").lower() not in excluded
             and str(message.get("content", "") or "").strip()]
+
+
+def _sync_image_statuses(originals: list[dict[str, Any]],
+                         progressed: list[dict[str, Any]]) -> None:
+    """把分批里写下的图片状态抄回商户那条**原始**消息。
+
+    ``_summary_work_batches`` 用 ``dict(message)`` 复制消息去分批，附件列表
+    仍是同一个对象；于是「已在本机解密」「网关未开放图片输入」「缓存无法解码」
+    这些状态都只写在副本上。界面读的是它自己传进来的那份 —— 抄回去，附件
+    列表才不会只剩一句笼统的"图片未能提交给 AI"，商户也就分得清是本地解不开
+    还是网关不吃图片。
+    """
+    if not originals or not progressed:
+        return
+    by_attachments = {id(item.get("attachments")): item for item in originals}
+    for item in progressed:
+        status = str(item.get("media_status") or "")
+        if not status:
+            continue
+        original = by_attachments.get(id(item.get("attachments")))
+        if original is not None and original is not item:
+            original["media_status"] = status
 
 
 def _summary_cache_key(stage: str, model: str, role_id: str,
@@ -1234,6 +1281,11 @@ def _reduce_summary_reports(client: Any, model: str, role_id: str, group: str,
                         client, model, prompt, reduce_output_limit, on_progress,
                         on_stream, is_cancelled, diagnostic_context=diagnostic_context,
                         max_continuations=0)
+                    # 合并只该去重、缩短，不该写出比输入大几倍的东西。模型
+                    # 偶尔会把两段观点"扩写"成一份很长的报告（真机上见过
+                    # 8K 输入吐回 9K），算它超长，按下面那条路保留原分段。
+                    if len(result) > max(2000, 3 * sum(len(part) for part in pair)):
+                        raise ValueError("合并结果过长：远大于输入分段。")
                 except ValueError as exc:
                     if not any(marker in str(exc)
                                for marker in ("过长", "长度上限", "输出上限")):
@@ -1299,6 +1351,9 @@ def _run_summary_jyi(client: Any, messages: list[dict[str, Any]], role_id: str =
     streamed_groups: set[str] = set()
     cancelled = False
     image_gateway_rejected = False
+    # 分批处理过的图片消息（浅拷贝）。跑完把状态抄回原始消息，见
+    # _sync_image_statuses —— 界面读的是原始那份。
+    processed_images: list[dict[str, Any]] = []
     if image_support is False:
         for item in image_messages:
             item["media_status"] = "当前模型不支持图片输入，未提交给 AI"
@@ -1330,6 +1385,8 @@ def _run_summary_jyi(client: Any, messages: list[dict[str, Any]], role_id: str =
             category_seen: dict[str, int] = {}
             for _chunk_index, (category, chunk) in enumerate(work_batches, start=1):
                 _raise_if_cancelled(is_cancelled)
+                if category in {"图片", "多模态"}:
+                    processed_images.extend(chunk)
                 if category == "图片" and image_support is False:
                     for item in chunk:
                         item["media_status"] = "当前模型不支持图片输入，未提交给 AI"
@@ -1520,6 +1577,9 @@ def _run_summary_jyi(client: Any, messages: list[dict[str, Any]], role_id: str =
         # 已完成的分段和缓存都在，尾巴照常组装成部分结果。
         cancelled = True
 
+    # 分批里写的图片状态回填到界面读的那份消息上（含被取消/失败的分批）。
+    _sync_image_statuses(image_messages, processed_images)
+
     # Bound process-local reuse while preserving the most recent completed batches.
     while len(cache) > 4096:
         cache.pop(next(iter(cache)))
@@ -1529,7 +1589,13 @@ def _run_summary_jyi(client: Any, messages: list[dict[str, Any]], role_id: str =
     partial_error = ("部分会话未完成：" + "；".join(failures)
                      + "。返回第六步重试时，已完成的分批结果会复用。" if failures and reports else "")
     if image_messages and image_support is False:
-        skipped = f"当前所选模型不支持图片输入，本次有 {len(image_messages)} 条图片消息未发送给 AI。"
+        if image_gateway_rejected:
+            # 网关拒了图片，但本地缓存是**解开过的** —— 得说清楚卡在哪一层，
+            # 否则商户以为图片坏了、去重新导出一次（同样的错再来一遍）。
+            skipped = ("本地图片已解密，但 AI 网关未开放图片输入，本次有 "
+                       f"{len(image_messages)} 条图片消息未发送给 AI。")
+        else:
+            skipped = f"当前所选模型不支持图片输入，本次有 {len(image_messages)} 条图片消息未发送给 AI。"
         partial_error = (partial_error + "；" + skipped) if partial_error else skipped
     elif image_messages:
         unavailable = sum(
@@ -1566,13 +1632,30 @@ def _run_summary_gateway_job(client: Any, messages: list[dict[str, Any]],
     """Submit and poll one bounded, billable gateway batch."""
     import time
 
-    payload_messages = [
-        {"sender": str(item.get("sender", ""))[:128],
-         "content": str(item.get("content", ""))[:4000],
-         "sent_at": str(item.get("sent_at", ""))[:64],
-         "kind": str(item.get("kind", "text"))[:32]}
-        for item in messages
-    ]
+    payload_messages: list[dict[str, str]] = []
+    for item in messages:
+        sender = str(item.get("sender", ""))[:128]
+        sent_at = str(item.get("sent_at", ""))[:64]
+        payload_messages.append({
+            "sender": sender,
+            "content": str(item.get("content", ""))[:4000],
+            "sent_at": sent_at,
+            "kind": str(item.get("kind", "text"))[:32],
+        })
+        # 本地预抽的文档正文也得随行：网关只吃 content，正文超过单条上限
+        # 就切片成多条，别让这一批只带着"文件说明"空跑一次（那是花了钱
+        # 却什么都没分析到）。
+        document_text = str(item.get("_analysis_document_text") or "")
+        document_name = str(item.get("_analysis_document_name") or "")
+        while document_text:
+            piece, document_text = document_text[:3500], document_text[3500:]
+            payload_messages.append({
+                "sender": sender,
+                "content": (f"文件附件《{document_name}》正文：\n" + piece
+                            if document_name else "文件附件正文：\n" + piece),
+                "sent_at": sent_at,
+                "kind": "text",
+            })
     try:
         submitted = client.submit_summary(
             {"task": "summarize", "messages": payload_messages,

@@ -42,7 +42,9 @@ class JYILoginTests(unittest.TestCase):
             query = urllib.parse.parse_qs(parsed.query)
             self.assertEqual(parsed.hostname, "ai.jyisolutions.com")
             self.assertEqual(parsed.path, "/connect/authorize")
-            self.assertEqual(query["client_id"], ["wechat_ai_assistant-desktop"])
+            # JYI 服务端登记的就是这个 ID，见 docs/jyi-production-login.md
+            # 和 deploy/register_jyi_client.sql（登记过的是 pyweixin-desktop）。
+            self.assertEqual(query["client_id"], ["pyweixin-desktop"])
             self.assertEqual(query["code_challenge_method"], ["S256"])
             requests.append(query)
             callback = query["redirect_uri"][0] + "?" + urllib.parse.urlencode({

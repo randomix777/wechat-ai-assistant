@@ -193,7 +193,9 @@ class WindowSessionTests(unittest.TestCase):
 class AccountCenterDataTests(unittest.TestCase):
     """账号中心显示的数据：名字、套餐、用量条、有效期，一个不能少。
 
-    用量只给百分比不给具体数；数据只许来自缓存，方法里不许查网。
+    用量条画的是**剩余**比例（和首页「分析额度剩余 X%」、``QuotaView
+    .remaining_percent`` 同一套语义，下拉里也写着"剩余 X%"）。只给百分比
+    不给具体数；数据只许来自缓存，方法里不许查网。
     """
 
     def _window(self, session, quota=None):
@@ -224,7 +226,8 @@ class AccountCenterDataTests(unittest.TestCase):
         self.assertEqual(data["name"], "一号店")
         self.assertEqual(data["plan"], "trial")
         self.assertEqual(data["period_end"], "2026-11-12")
-        self.assertEqual(data["quota"], {"kind": "percent", "percent": 20})
+        # 总量 100、已用 15、预留 5 ⇒ 剩 80%。
+        self.assertEqual(data["quota"], {"kind": "percent", "percent": 80})
 
     def test_unlimited_has_no_bar(self):
         import types
@@ -243,7 +246,7 @@ class AccountCenterDataTests(unittest.TestCase):
                                     "reserved_micro_usd": 0}}
         import types
         data = self._window(types.SimpleNamespace(**session))._account_center_data()
-        self.assertEqual(data["quota"], {"kind": "percent", "percent": 25})
+        self.assertEqual(data["quota"], {"kind": "percent", "percent": 75})
 
     def test_nothing_usable_is_unknown_not_zero(self):
         import types
@@ -261,7 +264,7 @@ class AccountCenterDataTests(unittest.TestCase):
             subscription={"quota_micro_usd": 200, "used_micro_usd": 50,
                           "reserved_micro_usd": 0, "plan_code": "pro"})
         data = self._window(session)._account_center_data()
-        self.assertEqual(data["quota"], {"kind": "percent", "percent": 25})
+        self.assertEqual(data["quota"], {"kind": "percent", "percent": 75})
         self.assertEqual(data["plan"], "pro")
 
     def test_never_touches_the_network(self):
@@ -329,7 +332,13 @@ class AccountDropdownTests(unittest.TestCase):
             buttons["充值"].invoke()
             root.update()
         opened.assert_called_once()
-        self.assertIn("/console/billing", opened.call_args.args[0])
+        # 收银页先进 JYI 登录页再回账单页，回跳目标按 URL 规矩做了编码，
+        # 所以断言里先 unquote 再找 "/console/billing"。
+        from urllib.parse import unquote, urlsplit
+
+        url = opened.call_args.args[0]
+        self.assertEqual(urlsplit(url).path, "/signin", "没登录时先去登录页")
+        self.assertIn("/console/billing", unquote(url))
 
     def test_recharge_fallback_when_browser_fails(self):
         import unittest.mock

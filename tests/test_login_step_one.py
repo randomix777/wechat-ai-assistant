@@ -83,8 +83,11 @@ class LoginIsStepOneTests(unittest.TestCase):
     def test_logout_also_refreshes_it(self):
         start = self.source.index("def _on_logout_from_center")
         block = self.source[start:start + 1600]
-        self.assertIn("_refresh_login_block()", block,
+        # 产品这里是把它放进刷新列表统一调用（for refresh in (...): refresh()），
+        # 源码里只有名字，没有 "_refresh_login_block()" 这种带括号的写法。
+        self.assertIn("_refresh_login_block", block,
                       "退出登录后第 1 步那块也要变回去")
+        self.assertIn("for refresh in", block, "光提一句不算刷新，得真的调")
 
 
 class WrongCauseTests(unittest.TestCase):

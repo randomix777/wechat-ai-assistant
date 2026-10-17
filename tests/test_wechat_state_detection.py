@@ -136,8 +136,15 @@ class ProbeDecisionTests(unittest.TestCase):
         from wechat_ai_assistant.WeChatTools import Tools
 
         original_where, original_running = Tools.where_weixin, Tools.is_weixin_running
+        original_wxid = getattr(Tools, "where_wxid_folder", None)
         Tools.where_weixin = lambda: "C:/fake/Weixin.exe"
         Tools.is_weixin_running = lambda: True
+        # 探针现在会先拿 wxid 数据目录直判「已登录」（4.1.15 起主窗口是
+        # 自绘 Qt，窗口类名那条路已经不通），找不到才走窗口判定。开发机
+        # 真装着微信时那一步就返回了 —— 下面这些**窗口分支**于是永远跑不到，
+        # 断言一律表现为 "logged_in != waiting_scan"。把 wxid 那一步也掐掉，
+        # 才是这个辅助函数自称的在测"窗口判定这一段"。
+        Tools.where_wxid_folder = lambda *a, **k: ""
         desktop = _FakeDesktop(**monkey_state)
         try:
             import wechat_ai_assistant.wechat_state as module
@@ -157,6 +164,10 @@ class ProbeDecisionTests(unittest.TestCase):
                 pywinauto.Desktop = original_desktop_class
         finally:
             Tools.where_weixin, Tools.is_weixin_running = original_where, original_running
+            if original_wxid is None:
+                del Tools.where_wxid_folder
+            else:
+                Tools.where_wxid_folder = original_wxid
 
     def test_logged_in_when_only_the_main_window_is_there(self):
         status = self._probe({"main": True, "login": False})

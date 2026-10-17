@@ -46,6 +46,10 @@ except ImportError:  # pragma: no cover
     # 降级兜底必须和契约**一致** —— 不一致就等于在降级时制造一个
     # 永远不能用的契约。此分支被 tests/test_contract_single_source.py
     # 的静态检查监督，改字面量时必须同时改 contract 里那一份。
+    #
+    # 这条分支只该给「装了本包、但没有同仓库的 packages/*」的部署用。
+    # 源码树里走不到这里：包的 __init__ 已经把 packages/*/src 挂上 sys.path，
+    # 无论谁先被导入。走得到就说明有人漏了那一步，而不是契约真的不存在。
     ITEM_KEYS = ("said", "brand", "category", "sku", "quantity", "unit", "evidence")
     OUTPUT_SCHEMA = {"type": "object", "required": []}
     PARSER_SYSTEM_PROMPT = ""

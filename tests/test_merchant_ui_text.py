@@ -494,7 +494,10 @@ class EmptySpaceTests(unittest.TestCase):
 
         self.assertEqual(conv_rows_height(0), CONV_ROWS_MIN, "空列表也不该塌成 0 行")
         self.assertEqual(conv_rows_height(2), CONV_ROWS_MIN, "2 行数据不该占满 12 行")
-        self.assertEqual(conv_rows_height(10), 10)
+        # 上限是产品定的 6 行（merchant_ui.py 里写着理由：给底部「下一步」留位置，
+        # 更多的会话在表格里滚动），所以"跟着内容长"只在 4~6 行这一段成立。
+        self.assertEqual(conv_rows_height(CONV_ROWS_MAX), CONV_ROWS_MAX)
+        self.assertEqual(conv_rows_height(10), CONV_ROWS_MAX, "超过上限就该停在上限，不是继续撑长页面")
         self.assertEqual(conv_rows_height(9999), CONV_ROWS_MAX, "再长也不能超过上限")
 
     def test_the_count_column_is_named_for_what_it_shows(self):
@@ -542,8 +545,10 @@ class FlowSimplicityTests(unittest.TestCase):
         self.assertEqual(
             WizardStep.ORDER,
             (WizardStep.WECHAT, WizardStep.CONVERSATIONS, WizardStep.HISTORY,
-             WizardStep.READ, WizardStep.REVIEW, WizardStep.ANALYZE, WizardStep.DONE),
+             WizardStep.READ, WizardStep.REVIEW, WizardStep.ANALYZE, WizardStep.RESULTS),
         )
+        # "开始使用"（首页）是跑完之后的落脚点，不算在要走的 7 步里。
+        self.assertNotIn(WizardStep.DONE, WizardStep.ORDER)
         self.assertEqual(WizardStep.TITLES[WizardStep.HISTORY], "确认读取范围")
         self.assertEqual(WizardStep.TITLES[WizardStep.READ], "读取历史消息")
         self.assertEqual(WizardStep.TITLES[WizardStep.REVIEW], "核对读取明细")

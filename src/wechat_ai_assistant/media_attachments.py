@@ -298,7 +298,10 @@ def attach_cached_files(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                         "cdnthumburl", "cdnmidimgurl", "cdnhdimgurl", "cdnbigimgurl")):
                     status = "本地缓存未命中；消息保留了微信 CDN 图片引用"
                 elif v4_images:
-                    status = "微信4.0加密图片未找到对应本地缓存"
+                    # 「加密」和「解密密钥」这两个词都要在：导出说明按这两类
+                    # 关键字把"已缓存但没解锁"和"真没缓存"分开写，别让商户
+                    # 以为图片丢了。
+                    status = "微信4.0加密图片未找到对应本地缓存（缺解密密钥）"
         elif kind == "video":
             picked = _first(candidates, {".mp4", ".mov", ".3gp"}) or _first(candidates, {".jpg", ".jpeg", ".png"})
         elif kind == "file":

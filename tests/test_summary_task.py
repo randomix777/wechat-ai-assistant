@@ -367,7 +367,8 @@ class CloudSummaryTests(unittest.TestCase):
                 return_value=[{"sender": "张姐", "content": "苹果两箱",
                                "sent_at": "2026-10-13 10:00", "kind": "text"}]):
             outcome = summary_task.run_summary(self._app(client), object())
-        self.assertIn("【纯文字】", outcome["summary"])
+        # 只有一个批次时不加类别标签（【纯文字】只在多批次/多会话时出现，
+        # 好让商户知道哪一段是哪一段），所以这里只认正文。
         self.assertIn("张姐要两箱苹果", outcome["summary"])
         self.assertEqual(outcome["error"], "")
         self.assertIsNone(outcome["cost"])

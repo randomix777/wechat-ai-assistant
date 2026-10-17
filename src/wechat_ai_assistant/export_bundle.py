@@ -118,7 +118,8 @@ def _readme(rows: list, groups: list, missing: list, generated_at: str,
     ]
     if encrypted:
         lines.append(
-            f"  另有 {len(encrypted)} 条图片消息因缺少解密密钥或缓存格式不支持，"
+            f"  另有 {len(encrypted)} 条图片消息是微信 4.0 加密格式"
+            "（本机没有可用的解密密钥，或缓存格式暂不支持），未解密导出，"
             "明细里保留［图片］占位：")
         for row in encrypted[:50]:
             lines.append(

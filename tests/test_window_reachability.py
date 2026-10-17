@@ -31,22 +31,25 @@ class WindowSizeSourceTests(unittest.TestCase):
     def setUp(self):
         self.source = (ROOT / "src" / "wechat_ai_assistant" / "merchant_ui.py").read_text(encoding="utf-8")
 
-    def test_the_minimum_height_is_not_below_the_default(self):
-        """最小高度低于默认高度 = 允许缩到装不下。
+    def test_the_minimum_height_keeps_its_floor(self):
+        """最小高度不许再降到实测丢过按钮的尺寸。
 
-        这是缺陷当时的根因：minsize(760, 560) 配 geometry("900x680")。
+        以前这条断言的是「最小高度 ≥ 默认高度」，那时的默认尺寸是写死的。
+        现在默认尺寸按屏幕算（大屏给到 760，老收银机 600），高度靠首页的
+        滚动容器兜底 —— 兜不兜得住由 MinimumSizeReachableTests 在真窗口里
+        量（缩到最小、滚到底，「查看订单」还点不点得到）。所以这里只钉住
+        那个不写理由就没法判断的硬地板。
         """
         import re
 
-        geometry = re.search(r'root\.geometry\("(\d+)x(\d+)"\)', self.source)
-        minsize = re.search(r"root\.minsize\((\d+),\s*(\d+)\)", self.source)
-        self.assertIsNotNone(geometry, "找不到窗口默认尺寸")
+        minsize = re.search(
+            r"root\.minsize\(min\((\d+), default_width\), min\((\d+), default_height\)\)",
+            self.source)
         self.assertIsNotNone(minsize, "找不到窗口最小尺寸")
-        self.assertGreaterEqual(
-            int(minsize.group(2)), int(geometry.group(2)),
-            "最小高度低于默认高度：商户能缩到一个装不下内容的尺寸，"
-            "最后排的按钮会直接消失",
-        )
+        self.assertGreaterEqual(int(minsize.group(1)), 860,
+                                "最小宽度降了：1366 宽的老收银机上并排摆不下微信")
+        self.assertGreaterEqual(int(minsize.group(2)), 620,
+                                "最小高度降了：这是实测丢过按钮的尺寸")
 
     def test_the_reason_is_written_down(self):
         """这个数字看起来像可以随手调小。写清理由，才不会有人"优化"掉。"""

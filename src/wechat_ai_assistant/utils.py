@@ -940,8 +940,11 @@ def avatar_click_point(item, dx: int = AVATAR_CLICK_DX, dy: int = AVATAR_CLICK_D
         return fallback
     if not (0.5 < scale_x < 4 and 0.5 < scale_y < 4):
         return fallback
-    center_x = (min_x + max_x) // 2
-    center_y = (min_y + max_y) // 2
+    # 采样是隔 step 个像素取一个，凡是命中的样本都代表 step×step 的一格，
+    # 所以右下边界要把这一格补回来 —— 不补就系统性地偏小半格（十来个像素
+    # 的头像上就是 1~2px，正好落在头像边缘）。
+    center_x = int((min_x + min(max_x + step - 1, x_end - 1)) / 2 + 0.5)
+    center_y = int((min_y + min(max_y + step - 1, y_end - 1)) / 2 + 0.5)
     return (rect.left + int(center_x * scale_x), rect.top + int(center_y * scale_y))
 
 

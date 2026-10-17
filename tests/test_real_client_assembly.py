@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -31,12 +32,20 @@ GROUP = "鲜果批发群"
 
 
 def rows():
+    """消息时间必须相对现在算。
+
+    以前这里写死 "2026-10-2 09:01"，而按「最近一周」读是从**今天**往前推
+    七天，日期一过期读取就合法地返回 0 条 —— 这组用例于是变成每天都会红
+    的定时炸弹（真炸的时候报的是「一条都没读到」，看着像装配坏了）。
+    """
+    first = datetime.now() - timedelta(hours=6)
+    second = first + timedelta(minutes=1)
     return {
         GROUP: [
             {"消息发送人": "张姐", "消息内容": "苹果两箱", "消息类型": "文本",
-             "消息发送时间": "2026-10-2 09:01"},
+             "消息发送时间": first.strftime("%Y-%m-%d %H:%M")},
             {"消息发送人": "张姐", "消息内容": "再加一箱", "消息类型": "文本",
-             "消息发送时间": "2026-10-2 09:02"},
+             "消息发送时间": second.strftime("%Y-%m-%d %H:%M")},
         ]
     }
 
