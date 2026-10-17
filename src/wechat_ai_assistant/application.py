@@ -37,12 +37,6 @@ from .history_read import (
     ReadMode,
     TimeWindow,
 )
-from .live_listen import (
-    LISTEN_DEGRADED,
-    LISTEN_STARTING,
-    LISTEN_STOPPED,
-    LiveListener,
-)
 from .merging import MergeSettings, MessageMerger
 from .receipts import ReceiptOutbox
 from .reliability import UiOperationQueue
@@ -70,16 +64,6 @@ LOGGER = logging.getLogger(__name__)
 
 #: 后台轮询间隔。停止后不会残留线程。
 POLL_INTERVAL_SECONDS = 3.0
-
-#: 监听能力在界面上必须常驻的一句话。
-#:
-#: 打开独立聊天窗口本身就会切前台，这条能力**从未在真实机器上验证过抢不抢
-#: 焦点**，因此不能承诺"不打断您使用微信"。把做不到的事写在界面上，比让人
-#: 以为可以一边接单一边正常用微信要好。
-LISTEN_FAIR_NOTE = (
-    "持续监听会打开一个独立的聊天窗口并占用本机前台。"
-    "这段时间请不要在这台电脑上使用微信，锁屏或断开远程桌面后监听会中断。"
-)
 
 #: 模型列表刷新失败时给商户看的话。**不带异常原文**。
 #:
@@ -115,8 +99,6 @@ class AppEvents:
     #: 以前只在"已就绪"时才发事件，于是关掉微信再点「重新检测」时，
     #: 状态其实变了，界面却一动不动 —— 商户看到的还是"已登录"。
     on_wechat: Callable[[Any], None] | None = None
-    #: 监听状态或统计发生变化。界面据此刷新开关与数字。
-    on_listen: Callable[[dict[str, Any]], None] | None = None
     #: 产品账号登录刚成功。界面靠它刷新登录框与门禁 —— 以前没人通知，
     #: 登录框一直写着"未登录"，门禁也不放行，商户以为登录没成功。
     #: 注意名字不能叫 on_login：界面上 _on_login 是"发起登录"按钮，
@@ -138,7 +120,7 @@ class MerchantApplication:
         conversation_source: ConversationSource | None = None,
         history_reader_fn: Callable[..., Any] | None = None,
         group_members_fn: Callable[[Any], Sequence[str]] | None = None,
-        sender_source: str = "members",
+        sender_source: str = "",
         gateway_url: str = "",
         client_factory: Callable[[Any], Any] | None = None,
         sender: Callable[[str, str], Any] | None = None,
@@ -154,7 +136,8 @@ class MerchantApplication:
         self.simulated = simulated
         self.gateway_url = gateway_url
 
-        # 所有涉及键鼠的操作共用一条串行队列：历史读取、监听、发送互不打断。
+        # 所有后台任务共用一条串行队列：解密拷贝、内存读取互不打断。
+        # （以前这里是键鼠串行队列；界面链移除后只剩数据任务。）
         self.ui_queue = UiOperationQueue(thread_name="merchant-ui")
         self.ui_lock = self.ui_queue
 
@@ -196,10 +179,14 @@ class MerchantApplication:
                 LOGGER.debug("wcdb hookup failed", exc_info=True)
         #: 没钥匙时点"读取"自动提一次。每个进程只试一次，重试走界面按钮。
         self._wcdb_ensure_attempted = False
-        #: 持续监听。默认**不启动** —— 它会打开独立聊天窗口并占用本机前台，
-        #: 必须由商户自己在首页上点开，见 :meth:`start_listening`。
-        self.listener: LiveListener | None = None
-        self._listen_state: tuple[str, str] = (LISTEN_STOPPED, "")
+        #: 界面链已移除：没有持续监听，只有定时轮询读解密库/内存。
+        #: 实时性要求高的商户把轮询间隔调小，或点「读取」手动补读。
+
+        # 注入了读取器 = 消息由调用方供给（测试替身、外部集成），那就是 members
+        # 语义：名单跟着一起递下去。生产路径不注入读取器，仍走 localdb/wcdb，
+        # 所以这里只是把"谁在供消息"这件事说清楚，不是回落。
+        effective_source = sender_source or (
+            "members" if history_reader_fn is not None else "localdb")
 
         self.history = HistoryReader(
             history_reader_fn or self._default_history_reader,
@@ -208,13 +195,12 @@ class MerchantApplication:
             # ? history_reader_fn ?????:??????????(????
             # 2 ???),????????????,????????
             group_members=group_members_fn or self._default_group_members,
-            # 群发送人来源。默认 members（上游原设计）：全量优先；
-            # avatar 实验链需要时显式开；有钥匙时 members 自动升级 wcdb。
-            sender_source=sender_source,
-            # 读历史时顺手记群名（面板标题里的）：解不出名的群也能显示真名。
-            alias_recorder=self._record_group_alias,
-            # 解密库直读：有钥匙才有，没有则 members 照旧（4.1 界面已死会失败，
-            # 但那是老行为，不在这里改门禁）。
+            # 群发送人来源。**空 = 自动**：注入了读取器就按 members 走
+            # （消息由调用方供给，名单是它的伴生参数）；生产不注入读取器，
+            # 走 localdb 内存 carve，有钥匙时自动升级 wcdb。
+            # 显式传值一律照用（测试要分别钉死三条路）。
+            sender_source=effective_source,
+            # 解密库直读：有钥匙才有，没有则按 localdb 内存路走。
             # 只给真实来源接：模拟/测试来源用自己的替身，不碰真微信。
             wcdb_reader_fn=(self._wcdb_reader
                             if isinstance(self.conversation_source, RealConversationSource)
@@ -359,9 +345,6 @@ class MerchantApplication:
         self._stop.set()
         self.monitor.stop()
         self.history.stop()
-        if self.listener is not None:
-            listener, self.listener = self.listener, None
-            listener.stop()
         with self._lock:
             poller = self._poller
             self._poller = None
@@ -377,8 +360,7 @@ class MerchantApplication:
         while not self._stop.is_set():
             try:
                 self.refresh_home()
-                if self.parse_service is not None and self.auto.sending_allowed:
-                    self.dispatch_receipts()
+                # 自动发送已移除：回执只整理、不发送，不再有后台派发循环。
             except Exception as exc:  # pragma: no cover - defensive
                 self._error(str(exc))
             self._stop.wait(POLL_INTERVAL_SECONDS)
@@ -747,46 +729,39 @@ class MerchantApplication:
             return None
 
     def ensure_wcdb_keys(self, timeout: float = 300.0) -> tuple[bool, str]:
-        """跑上游工具提取一次密钥（后台线程调，会扫几十秒内存）。
+        """进程内提取一次密钥（后台线程调，会扫几十秒内存）。
 
-        钥匙跟微信大版本走，大版本不变一直能用。返回 (ok, 说明)。
+        以前是子进程调 third_party 下的脚本：打包一漏就报"提取工具
+        不在"，子进程编码（cp1252 中文崩）还要单独伺候。现在调包内
+        vendored 的 :mod:`._wcdb_key_tool`，没有外部脚本、没有子进程、
+        输出直接吞掉不经过控制台。
+
+        ``timeout`` 保留只为兼容旧签名：进程内扫描中途停不下来，
+        传了也不生效。钥匙跟微信大版本走，大版本不变一直能用。
+        返回 (ok, 说明)。
         """
-        import subprocess
-        import sys
+        import contextlib
+        import io
+        from types import SimpleNamespace
 
         storage = self._wcdb_db_storage()
         if storage is None:
             return False, "微信还没登录，先登录再提取"
-        script = (Path(__file__).resolve().parent.parent.parent
-                  / "third_party" / "wcdb-key-tool" / "wcdb_key_tool_windows.py")
-        if not script.is_file():
-            return False, "提取工具不在（third_party 缺失），按文档手动跑一次"
-        keys_path = self.wcdb_keys_path()
         try:
-            import os as _os
-
-            env = dict(_os.environ)
-            # 子进程强制 UTF-8：它要打印中文，直接继承的系统编码（这台机器是
-            # cp1252）连 print 都会崩。父进程这边按 UTF-8 解（见下）。
-            env["PYTHONUTF8"] = "1"
-            proc = subprocess.run(
-                [sys.executable, str(script), "extract",
-                 "--db-dir", str(storage), "--output", str(keys_path)],
-                capture_output=True, timeout=timeout, env=env,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        except subprocess.TimeoutExpired:
-            return False, "提取超时（超过 %d 秒），微信太忙时重试" % int(timeout)
+            from ._wcdb_key_tool import cmd_extract
         except Exception as exc:
-            return False, f"启动提取失败：{exc}"
-        # 输出按 UTF-8 解（子进程继承的系统编码可能是 cp1252，直接 text=True
-        # 会在中文输出上崩 —— 之前"提取没成功"报的就是这个 charmap错）。
-        # Windows C 运行库的中文控制台编码不足以覆盖微信输出中的全部字符，
-        # 所以这里不信任 locale，认死 UTF-8（子进程被强制 UTF-8，见 env）。
-        stdout = proc.stdout.decode("utf-8", errors="replace") if proc.stdout else ""
-        stderr = proc.stderr.decode("utf-8", errors="replace") if proc.stderr else ""
-        if proc.returncode != 0:
-            tail = (stderr or stdout)[-300:]
-            return False, f"提取没成功：{tail}"
+            return False, f"提取模块加载失败：{exc}"
+        keys_path = self.wcdb_keys_path()
+        args = SimpleNamespace(db_dir=str(storage), output=str(keys_path),
+                               decrypt=False)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                cmd_extract(args)
+        except SystemExit as exc:
+            if exc.code not in (None, 0):
+                return False, "提取没成功（没扫到钥匙），微信太忙时重试"
+        except Exception as exc:
+            return False, f"提取失败：{exc}"
         ok, _ = self.wcdb_status()
         if ok:
             self._seal_wcdb_keys()
@@ -866,120 +841,6 @@ class MerchantApplication:
 
     def cancel_history(self) -> None:
         self.wizard.cancel_history()
-
-    # ------------------------------------------------------------ 持续监听
-
-    def listen_view(self) -> dict[str, Any]:
-        """界面上那个开关要显示的东西。全是商户看得懂的中文。"""
-        listener = self.listener
-        stats = listener.stats if listener is not None else None
-        gaps = listener.gap_report() if listener is not None else []
-        return {
-            "running": bool(listener is not None and listener.running),
-            "conversation": listener.conversation.disambiguation if listener is not None else "",
-            "state": self._listen_state[0],
-            "detail": self._listen_state[1],
-            "summary": stats.describe() if stats is not None else "",
-            "started_at": stats.started_at if stats is not None else 0.0,
-            "events_seen": stats.events_seen if stats is not None else 0,
-            "events_stored": stats.events_stored if stats is not None else 0,
-            "orders_applied": stats.orders_applied if stats is not None else 0,
-            "reviews_raised": stats.reviews_raised if stats is not None else 0,
-            "batches_flushed": stats.batches_flushed if stats is not None else 0,
-            "skipped_own": stats.events_skipped_own if stats is not None else 0,
-            "skipped_duplicate": stats.events_skipped_duplicate if stats is not None else 0,
-            "gaps": gaps,
-            "gap_count": len(gaps),
-            # 界面常驻说明。这条能力从未在真实机器上验证过抢不抢焦点，
-            # 所以不能承诺"不打断您使用微信"。
-            "note": LISTEN_FAIR_NOTE,
-        }
-
-    def start_listening(self, conversation: Conversation, group_members: Sequence[str] = ()) -> bool:
-        """对**一个**会话开持续监听。
-
-        会打开一个独立聊天窗口并占用本机前台 —— 首期只监听一个会话。
-        """
-        if self.listener is not None and self.listener.running:
-            return False
-        if self.simulated:
-            self._listen_state = (LISTEN_DEGRADED, "演示模式下不真的开监听")
-            self._emit_listen()
-            return False
-
-        listener = LiveListener(
-            conversation=conversation,
-            store=self.agent_store,
-            merger=self.merger,
-            pipeline=self.pipeline,
-            account_id=self.settings.account_id or "default",
-            group_members=tuple(group_members),
-            ui_lock=self.ui_lock,
-            sink=self._live_sink(conversation),
-            on_state=self._on_listen_state,
-        )
-        self.listener = listener
-        self._listen_state = (LISTEN_STARTING, "正在打开聊天窗口")
-        listener.start()
-        self._emit_listen()
-        return True
-
-    def stop_listening(self) -> None:
-        listener = self.listener
-        self.listener = None
-        if listener is None:
-            self._listen_state = (LISTEN_STOPPED, "")
-            self._emit_listen()
-            return
-        listener.stop()
-        stats = listener.stats
-        lost = len(listener.gaps)
-        detail = f"已停止。看到 {stats.events_seen} 条，入库 {stats.events_stored} 条"
-        if lost:
-            # 不承诺不漏消息：中断期间的缺口必须说出来。
-            detail += f"；有 {lost} 段时间没有采集，那期间的消息需要单独补读"
-        self._listen_state = (LISTEN_STOPPED, detail)
-        self.refresh_home()
-        self._emit_listen()
-
-    def _live_sink(self, conversation: Conversation):
-        """把一条实时事件写进**商户本地订单库**，返回 (是否新入库, message_id)。
-
-        这里不能用 :class:`AgentStore`。客户端整条链（``OrderPipeline``、
-        ``LocalParseService``）都按 ``OrderStore.messages.id`` 回查本地消息，
-        拿 ``AgentStore`` 的 ``event_id`` 去查必然落空，消息会被静默丢掉。
-        """
-        tenant = self.tenant
-        orders = self.orders
-        # 每个会话一个固定的 source：同一批重复投递会命中
-        # UNIQUE(merchant_id,group_id,source_id) 被 INSERT OR IGNORE 挡掉。
-        source = f"live:{conversation.identity}"
-
-        def sink(event: Any) -> tuple[bool, str]:
-            payload = {
-                "sender": event.sender,
-                "content": event.content,
-                "kind": event.kind.value if hasattr(event.kind, "value") else str(event.kind),
-                "sent_at": event.sent_at or "",
-                "source_id": event.stable_id or event.event_id,
-                "stable_source_id": bool(event.stable_id),
-            }
-            outcome = orders.add_import(tenant, conversation.name, [payload], source, "live", "")
-            ids = list(outcome.get("message_ids") or [])
-            return (bool(ids), ids[0] if ids else "")
-
-        return sink
-
-    def _on_listen_state(self, state: str, detail: str) -> None:
-        self._listen_state = (state, detail)
-        self._emit_listen()
-
-    def _emit_listen(self) -> None:
-        if self.events.on_listen:
-            try:
-                self.events.on_listen(self.listen_view())
-            except Exception:
-                LOGGER.debug("listen view render skipped", exc_info=True)
 
     # ------------------------------------------------------------ ④ 额度
 
@@ -1514,50 +1375,17 @@ class MerchantApplication:
 
     @staticmethod
     def _default_history_reader(**kwargs: Any) -> list[dict[str, Any]]:
-        from .WeChatAuto import Messages
-
-        return list(Messages.dump_chat_history(**kwargs) or [])
-
-    @staticmethod
-    def _record_group_alias(self, wxid: str, name: str) -> None:
-        """读历史时顺手记群名：面板标题里的群名 → 备注映射。
-
-        内存里解不出名的群（资料页没进内存），靠这次翻到的标题补齐。
-        已有备注不覆盖；写盘失败只留日志，不挡读取。
-        """
-        self.set_alias(wxid, name)
+        # 界面链已移除：没有注入读取器时不碰微信窗口，直接明说。
+        # 生产里这条走不到（解密库/内存两条路在 HistoryReader 内部），
+        # 撞到这里说明装配错了，别静默读个空。
+        raise RuntimeError("界面读取已移除：先点「重新提取密钥」走解密库，或用内存路读取")
 
     def _default_group_members(conversation: Any) -> list[str]:
-        """群成员的昵称列表。读取群聊历史时用来认出发送人。
-
-        ## 为什么必须传
-
-        不传的话读取器靠「两次遍历对比」反推发送人，对不上时会把发送人写成
-        「红包或转账(无法获取发送人)」这个固定占位串 —— 商户拿到一堆
-        不知道是谁说的话。传了成员就**直接解析**，不依赖那次对比。
-        不传的话读取器靠「两次遍历对比」反推发送人，对不上时会把发送人写成
-        「红包或转账(无法获取发送人)」这个固定占位串 —— 商户拿到一堆
-        不知道是谁说的话。传了成员就**直接解析**，不依赖那次对比。
-
-        ## 失败不抛
-
-        取成员要打开微信界面，可能超时、可能失败。**取不到只是发送人认不出来，
-        消息本身还能读** —— 为此中断整次读取是拿小的换大的。
-        """
-        try:
-            from .WeChatAuto import Contacts
-
-            return [str(name) for name in (Contacts.get_groupMembers_info(
-                conversation.name, is_maximize=False, close_weixin=False) or []) if name]
-        except Exception as exc:
-            # **不打堆栈。** 「取不到群成员」是常见情况，不是崩溃：
-            # 微信没开、群名对不上、界面正忙 —— 都会走到这里。
-            # 打完整堆栈会让真正的故障淹没在噪声里。
-            #
-            # 但也不能不出声：这次读取的发送人会认不出来，排查时要知道原因。
-            LOGGER.warning("取不到群成员，这次读取的发送人可能认不出来：%s（%s: %s）",
-                           getattr(conversation, "name", ""), type(exc).__name__, exc)
-            return []
+        # 界面链已移除：取成员要打开微信界面，这条路没有了。
+        # 生产默认 sender_source 已是 localdb/wcdb，走不到这里；
+        # 撞到说明有人显式传了 members 却没注入名单，返回空让发送人写 wxid，
+        # 不中断读取（消息本身还能读）。
+        return []
 
     def close(self) -> None:
         self.stop()

@@ -147,52 +147,6 @@ class StaticInspector:
         )
 
 
-class WeChatTargetInspector:
-    """基于 UIA 的只读检查。
-
-    只读取：会话标题文字、输入框当前文本。不调用任何 ``set_text``、
-    ``click_input``、``type_keys`` 或剪贴板函数。
-    """
-
-    def __init__(self, expected_account: str = "", timeout: float = 0.2):
-        self.expected_account = expected_account
-        self.timeout = timeout
-
-    def inspect(self, conversation: str) -> TargetState:
-        try:
-            from .Uielements import Edits, Lists
-            from .WeChatTools import Navigator
-        except Exception:
-            return TargetState(observed=False)
-        try:
-            main_window = Navigator.find_main_window()
-        except Exception:
-            return TargetState(observed=False)
-        if main_window is None:
-            return TargetState(observed=False)
-        state = TargetState(window_ready=True, observed=True)
-        try:
-            edit_area = main_window.child_window(**Edits.CurrentChatEdit)
-            if not edit_area.exists(timeout=self.timeout):
-                return TargetState(window_ready=False, observed=True)
-            state.draft_text = str(edit_area.get_value() or "")
-        except Exception:
-            return TargetState(window_ready=True, observed=False)
-        try:
-            title = main_window.child_window(**Lists.CurrentChatNameText)
-            state.conversation = str(title.window_text() or "") if title.exists(timeout=self.timeout) else ""
-        except Exception:
-            state.conversation = ""
-        try:
-            from .WeChatTools import Tools
-
-            folder = Tools.where_wxid_folder()
-            state.account_id = folder.rstrip("\\/").split("\\")[-1].split("/")[-1] if folder else ""
-        except Exception:
-            state.account_id = ""
-        return state
-
-
 #: 真实发送在真机验证前的总开关。**默认关闭**。
 _REAL_SENDING_VERIFIED = False
 
@@ -336,7 +290,6 @@ __all__ = [
     "TargetInspector",
     "TargetState",
     "VERDICT_MESSAGES",
-    "WeChatTargetInspector",
     "attach_guard",
     "mark_real_sending_verified",
     "real_sending_available",

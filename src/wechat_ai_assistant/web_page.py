@@ -28,14 +28,19 @@ PAGE = r"""<!DOCTYPE html>
   body { margin: 0; font: 14px/1.6 "Microsoft YaHei", "PingFang SC", sans-serif;
          color: var(--ink); background: var(--bg); }
   header { background: var(--card); border-bottom: 1px solid var(--line);
-           padding: 12px 20px; display: flex; align-items: center; gap: 14px; }
-  header h1 { font-size: 16px; margin: 0; }
+           padding: 12px 20px; display: flex; align-items: center; gap: 14px;
+           position: sticky; top: 0; z-index: 10; }
+  header h1 { font-size: 16px; margin: 0; white-space: nowrap; }
+  header nav { display: flex; gap: 2px 10px; flex-wrap: wrap; font-size: 12px; }
+  header nav a { color: var(--muted); text-decoration: none; }
+  header nav a:hover { color: var(--accent); }
   .badge { font-size: 12px; color: var(--muted); border: 1px solid var(--line);
            border-radius: 999px; padding: 2px 10px; }
   main { max-width: 1080px; margin: 0 auto; padding: 20px; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px;
           padding: 16px; margin-bottom: 16px; }
   .card h2 { font-size: 14px; margin: 0 0 4px; }
+  section[id] { scroll-margin-top: 70px; }
   .hint { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
   button { font: inherit; padding: 7px 14px; border-radius: 6px; border: 1px solid var(--line);
            background: var(--card); color: var(--ink); cursor: pointer; }
@@ -63,6 +68,9 @@ PAGE = r"""<!DOCTYPE html>
 <body>
 <header>
   <h1>微信AI智能助理 · 开发调试</h1>
+  <nav>
+    <a href="#s-acct">账号</a><a href="#s-wechat">微信</a><a href="#s-conv">会话</a><a href="#s-read">读取</a><a href="#s-analyze">整理</a><a href="#s-orders">订单</a><a href="#s-logs">日志</a>
+  </nav>
   <span class="badge" id="step">—</span>
   <span class="badge" id="busy" hidden></span>
   <span style="margin-left:auto"></span>
@@ -72,7 +80,7 @@ PAGE = r"""<!DOCTYPE html>
 <main>
   <div id="banner"></div>
 
-  <section class="card">
+  <section class="card" id="s-acct">
     <h2>0 · 产品账号</h2>
     <p class="hint">
       智能整理要提交任务给云端，**依赖产品账号**。没登录必然失败，
@@ -89,7 +97,7 @@ PAGE = r"""<!DOCTYPE html>
     </p>
   </section>
 
-  <section class="card">
+  <section class="card" id="s-wechat">
     <h2>1 · 微信</h2>
     <p class="hint">读取历史需要微信已登录并打开。</p>
     <div class="row">
@@ -99,7 +107,7 @@ PAGE = r"""<!DOCTYPE html>
     </div>
   </section>
 
-  <section class="card">
+  <section class="card" id="s-conv">
     <h2>2 · 选会话</h2>
     <p class="hint">勾选要读取历史的群。不选就是全部。</p>
     <div id="conversations" class="empty">还没有会话，点上面「刷新会话列表」。</div>
@@ -110,9 +118,9 @@ PAGE = r"""<!DOCTYPE html>
     </div>
   </section>
 
-  <section class="card">
+  <section class="card" id="s-read">
     <h2>3 · 读取历史</h2>
-    <p class="hint">这一步驱动微信窗口，可能要一两分钟。可以关掉页面，它在后台跑。</p>
+    <p class="hint">这一步在后台读历史，可能要一两分钟。可以关掉页面，它在后台跑。</p>
     <div class="row">
       <button class="primary" onclick="post('/api/history/read')">开始读取</button>
       <button onclick="post('/api/history/cancel')">停止读取</button>
@@ -121,7 +129,7 @@ PAGE = r"""<!DOCTYPE html>
     <div id="history" style="margin-top:10px"></div>
   </section>
 
-  <section class="card">
+  <section class="card" id="s-analyze">
     <h2>4 · 智能整理</h2>
     <p class="hint">已整理过的消息不会重复提交 —— 重复提交会真的花钱，而结果只会是「已处理过」。</p>
     <div class="row">
@@ -160,7 +168,7 @@ PAGE = r"""<!DOCTYPE html>
     <div id="reference" style="margin-top:10px"></div>
   </section>
 
-  <section class="card">
+  <section class="card" id="s-orders">
     <h2>订单</h2>
     <div class="row" style="margin-bottom:10px">
       <button onclick="load('/api/orders')">刷新订单</button>
@@ -168,7 +176,7 @@ PAGE = r"""<!DOCTYPE html>
     <div id="orders"><p class="empty">还没看。</p></div>
   </section>
 
-  <section class="card">
+  <section class="card" id="s-logs">
     <h2>运行日志</h2>
     <p class="hint">出问题时这里是最先要看的地方。</p>
     <div id="logs">（还没有）</div>
@@ -178,6 +186,16 @@ PAGE = r"""<!DOCTYPE html>
 <script>const DATADIR = "__DATADIR__";
 let polling = null;
 const $ = (id) => document.getElementById(id);
+
+// 轮询每 1.2 秒全量跑一次 render，直接 innerHTML 会让滚动抖、
+// 选中的复选框掉状态（会话表虽不在轮询里，但进度/日志区一样闪）。
+// setHtml 只在内容真变了才写 DOM。
+const _htmlCache = {};
+function setHtml(id, html) {
+  if (_htmlCache[id] === html) return;
+  _htmlCache[id] = html;
+  $(id).innerHTML = html;
+}
 
 function esc(s) {
   return String(s == null ? "" : s).replace(/[&<>"]/g, (c) =>
@@ -211,8 +229,8 @@ async function load(path) {
 }
 
 function banner(text, bad) {
-  if (!text) { $("banner").innerHTML = ""; return; }
-  $("banner").innerHTML = '<div class="msg ' + (bad ? "bad" : "good") + '">' + esc(text) + "</div>";
+  if (!text) { setHtml("banner", ""); return; }
+  setHtml("banner", '<div class="msg ' + (bad ? "bad" : "good") + '">' + esc(text) + "</div>");
 }
 
 function render(data) {
@@ -242,12 +260,12 @@ function render(data) {
   if (data.progress) {
     const p = data.progress;
     const pct = p.total ? Math.round(p.done * 100 / p.total) : 0;
-    $("progress").innerHTML =
+    setHtml("progress",
       '<div class="out">已读 ' + p.done + " / " + p.total + "（" + pct + "%）" +
       (p.current ? "<br>当前：" + esc(p.current) : "") +
-      (p.message ? "<br>" + esc(p.message) : "") + "</div>";
+      (p.message ? "<br>" + esc(p.message) : "") + "</div>");
   } else {
-    $("progress").innerHTML = "";
+    setHtml("progress", "");
   }
 
   // 读取结果
@@ -271,29 +289,30 @@ function render(data) {
       html += "<tr><td>" + esc(row.name) + "</td><td>" + row.count +
               "</td><td>" + esc(status) + "</td></tr>";
     }
-    $("history").innerHTML = html + "</table><p class=\"hint\">本次合计 " + h.total + " 条。</p>";
+    setHtml("history", html + "</table><p class=\"hint\">本次合计 " + h.total + " 条。</p>");
   }
 
   // 整理结果
   const a = data.analysis;
   if (a) {
-    $("analysis").innerHTML = '<div class="out">' +
+    setHtml("analysis", '<div class="out">' +
       "处理 " + a.processed + " 条消息<br>生成订单 " + a.with_result + " 单<br>" +
       "需要核对 " + a.needs_review + " 单<br>本次提交任务 " + a.submitted_jobs + " 个" +
       (a.already_analyzed ? "<br>已整理过、本次没重复提交 " + a.already_analyzed + " 条" : "") +
-      "</div>";
+      "</div>");
   }
 
   // 摘要：最终结果优先；还在跑时显示流式增量，不用干等。
+  // 流式每次内容都变，setHtml 在这里天然每次都写 —— 就是要它实时。
   const s = data.summary;
   if (s) {
-    $("summary").innerHTML = s.error
+    setHtml("summary", s.error
       ? '<div class="msg bad">' + esc(s.error) + "</div>"
       : '<div class="out">' + esc(s.summary) +
-        (s.cancelled ? '<br><span class="hint">已取消：以上是已完成部分</span>' : "") + "</div>";
+        (s.cancelled ? '<br><span class="hint">已取消：以上是已完成部分</span>' : "") + "</div>");
   } else if (data.summary_stream) {
-    $("summary").innerHTML = '<div class="out">' + esc(data.summary_stream) +
-      '<br><span class="hint">正在生成……</span></div>';
+    setHtml("summary", '<div class="out">' + esc(data.summary_stream) +
+      '<br><span class="hint">正在生成……</span></div>');
   }
 
   $("sumBtn").disabled = !data.can_summarize;
@@ -305,7 +324,7 @@ function render(data) {
 
 function renderConversations(rows) {
   if (!rows || !rows.length) {
-    $("conversations").innerHTML = '<p class="empty">没有会话。</p>';
+    setHtml("conversations", '<p class="empty">没有会话。</p>');
     return;
   }
   let html = "<table><tr><th></th><th>会话</th><th>类型</th><th>成员</th></tr>";
@@ -316,6 +335,9 @@ function renderConversations(rows) {
   }
   $("conversations").innerHTML = html + "</table>";
 }
+
+// 注意：会话表不在轮询里，只在手动“刷新会话列表”时重写，
+// 所以勾选状态不会被 1.2 秒的 tick 冲掉 —— 别把它搬进 render。
 
 function chooseAll(flag) {
   for (const box of document.querySelectorAll(".pick")) box.checked = flag;
@@ -346,8 +368,28 @@ async function doLogin() {
   banner("已发起登录。按提示完成授权，登录成功后这里会自动变。", false);
 }
 
+let _logoutArmed = false;
+let _logoutTimer = null;
 async function doLogout() {
-  if (!confirm("确定退出登录吗？\n\n已经读到的消息和订单会留在这台电脑上，没有删除。")) return;
+  // 原生 confirm 会抢整页焦点，跟“后台跑”的定位冲突。
+  // 改成按钮两段确认：第一下变红字警告，3 秒内再点才真退。
+  const btn = $("logoutBtn");
+  if (!_logoutArmed) {
+    _logoutArmed = true;
+    btn.textContent = "再点一次确认退出（消息订单都保留）";
+    btn.classList.add("primary");
+    banner("再点一次「退出登录」才生效。已经读到的消息和订单会留在这台电脑上，没有删除。", false);
+    _logoutTimer = setTimeout(() => {
+      _logoutArmed = false;
+      btn.textContent = "退出登录";
+      btn.classList.remove("primary");
+    }, 3000);
+    return;
+  }
+  clearTimeout(_logoutTimer);
+  _logoutArmed = false;
+  btn.textContent = "退出登录";
+  btn.classList.remove("primary");
   await post("/api/logout");
   banner("已退出登录。消息和订单都还在，重新登录后可以继续整理，不会重复读取。", false);
 }
@@ -358,7 +400,7 @@ async function reference(kind) {
   const out = await post("/api/reference", {kind: kind, text: text});
   if (!out) return;
   if (out.error) {
-    $("reference").innerHTML = '<div class="msg bad">' + esc(out.error) + "</div>";
+    setHtml("reference", '<div class="msg bad">' + esc(out.error) + "</div>");
   } else {
     let html = '<div class="msg good">新增 ' + (out.created || 0) + " 条，更新 " +
                (out.updated || 0) + " 条";
@@ -367,7 +409,7 @@ async function reference(kind) {
     if (out.problems && out.problems.length) {
       html += "<pre class=\"out\">" + out.problems.map(esc).join("\n") + "</pre>";
     }
-    $("reference").innerHTML = html;
+    setHtml("reference", html);
   }
 }
 

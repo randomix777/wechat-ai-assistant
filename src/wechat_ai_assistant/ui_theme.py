@@ -73,7 +73,20 @@ def apply_theme(root: Any) -> ttk.Style:
     style.configure("Section.TLabel", font=SECTION_FONT, foreground=INK,
                     background=CARD_BG)
     style.configure("SectionPage.TLabel", font=SECTION_FONT, foreground=INK,
-                    background=CARD_BG)
+                    background=APP_BG)
+    # 页面灰底上的小提示（直接挂在 page-body frame 上的裸 label 用这个，
+    # 否则默认白底会在灰底上露出一块白斑）。
+    style.configure("PageHint.TLabel", font=HINT_FONT, foreground=MUTED,
+                    background=APP_BG)
+    # 页面上的粗字小标题（整理角色/分析结果这种），灰底版本。
+    style.configure("PageStrong.TLabel", font=(FONT, 10, "bold"), foreground=INK,
+                    background=APP_BG)
+    # 页面上的警告行（密钥没提/登录过期），灰底版本。
+    style.configure("PageWarn.TLabel", font=BODY_FONT, foreground=WARN,
+                    background=APP_BG)
+    # 页面上的通过数（已选 N 个），灰底版本。
+    style.configure("PageOk.TLabel", font=BODY_FONT, foreground=GOOD,
+                    background=APP_BG)
     style.configure("Body.TLabel", font=BODY_FONT, foreground=INK, background=CARD_BG)
     style.configure("Secondary.TLabel", font=BODY_FONT, foreground=SECONDARY,
                     background=CARD_BG)
@@ -145,7 +158,10 @@ def apply_theme(root: Any) -> ttk.Style:
 
     # ---- 容器（全白画布：Label 自带底色，和父容器不一致就会露斑，
     # 全白是最不会出错的做法，结构靠卡片边框和间距表达）
-    style.configure("Page.TFrame", background=CARD_BG)
+    # 页面容器用浅灰底，卡片（白底 + LINE 描边）自然浮出来。
+    # 卡片内部文字样式保持 CARD_BG 不动，只有直接坐在页面上的
+    # SectionPage / PageHint 用 APP_BG。
+    style.configure("Page.TFrame", background=APP_BG)
     style.configure("Card.TFrame", background=CARD_BG)
     style.configure("CardTitle.TFrame", background=CARD_BG)
     style.configure("TopBar.TFrame", background=CARD_BG)
@@ -241,6 +257,9 @@ class Stepper:
         self.frame.pack(fill="x")
         self._dots: dict[str, Any] = {}
         self._labels: dict[str, Any] = {}
+        self._cells: dict[str, Any] = {}
+        self._arrows: list[Any] = []
+        self._current: str = STEPS[0][0] if STEPS else ""
         for index, (key, short) in enumerate(STEPS):
             cell = ttk.Frame(self.frame, style="Stepper.TFrame")
             cell.pack(side="left", padx=(0, 4))
@@ -252,13 +271,67 @@ class Stepper:
             label.pack(side="left", padx=(6, 10))
             self._dots[key] = dot
             self._labels[key] = label
+            self._cells[key] = cell
             if index < len(STEPS) - 1:
                 arrow = ttk.Label(self.frame, text="›", style="Muted.TLabel")
                 arrow.pack(side="left", padx=(0, 4))
+                self._arrows.append(arrow)
+        # 窄窗（和微信并排时只有 860 宽）7 步一排会溢出被切掉：
+        # 只留首/末/当前/前后一步的名字，其余缩成圆点。
+        try:
+            parent.bind("<Configure>", lambda _e: self._fit(), add="+")
+            self.frame.after_idle(self._fit)
+        except Exception:
+            pass
+
+    def _fit(self) -> None:
+        """按实际宽度折叠步骤名。pack_forget 只是不画，点和状态都在，
+        窗口拉宽就地恢复，不重建。"""
+        try:
+            width = int(self.frame.winfo_width() or 0)
+        except Exception:
+            return
+        if width <= 1:
+            try:
+                self.frame.after(200, self._fit)
+            except Exception:
+                pass
+            return
+        order = [key for key, _ in STEPS]
+        try:
+            position = order.index(self._current)
+        except ValueError:
+            position = 0
+        compact = width < 780
+        keep = {order[0], order[-1], order[position]}
+        if position > 0:
+            keep.add(order[position - 1])
+        if position < len(order) - 1:
+            keep.add(order[position + 1])
+        for key in order:
+            label = self._labels[key]
+            try:
+                shown = bool(label.winfo_ismapped())
+            except Exception:
+                shown = True
+            want = (not compact) or (key in keep)
+            if want and not shown:
+                try:
+                    label.pack(side="left", padx=(6, 10))
+                except Exception:
+                    pass
+            elif not want and shown:
+                try:
+                    label.pack_forget()
+                except Exception:
+                    pass
+        # 箭头永远留着：它只占一个字符，不断行；藏了它步骤的先后反而看不清。
+        # （也不敢 pack_forget 箭头再 pack 回来 —— 会掉到行尾，顺序全乱。）
 
     def set_step(self, current: str) -> None:
         """按当前步骤刷新三态。未知步骤（如 quota）映射到 analyze。"""
         mapped = {"quota": "analyze", "done": "results"}.get(current, current)
+        self._current = mapped
         order = [key for key, _ in STEPS]
         try:
             position = order.index(mapped)

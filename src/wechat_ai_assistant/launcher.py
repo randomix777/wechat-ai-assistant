@@ -16,6 +16,18 @@ import threading
 from pathlib import Path
 from typing import Any
 
+#: 打包成窗口版（``console=False``）时 ``sys.stdout``/``sys.stderr`` 是 ``None``。
+#: 库里有大量 ``print``（监听、导出、发送），没有兜底就会 ``AttributeError``
+#: 中断自动化。这里记住「原本有没有控制台」，由 :func:`_fail` 决定打印还是弹窗。
+_HAS_CONSOLE = sys.stdout is not None
+
+
+def _ensure_streams() -> None:
+    """窗口版没有控制台，给 ``print`` 一个黑洞，别让它们把程序打断。"""
+    for name in ("stdout", "stderr"):
+        if getattr(sys, name) is None:
+            setattr(sys, name, open(os.devnull, "w", encoding="utf-8"))
+
 
 def repo_root() -> Path:
     """定位仓库根目录：``<root>/src/wechat_ai_assistant/launcher.py``。"""
@@ -75,15 +87,31 @@ def _show_update_splash(version: str) -> None:
         import tkinter as tk
     except Exception:
         return
+    try:
+        from wechat_ai_assistant.ui_theme import APP_BG, BRAND, CARD_BG, FONT, INK
+    except Exception:  # 主题模块不可用时回退到内联色值，闪屏不能挡更新。
+        APP_BG, BRAND, CARD_BG, FONT, INK = "#f2f4f7", "#0e9f6e", "#ffffff", "Microsoft YaHei", "#1a1d21"
     root = None
     try:
         root = tk.Tk()
         root.title("微信AI智能助理 - 正在更新")
         root.resizable(False, False)
+        root.configure(background=CARD_BG)
+        root.attributes("-topmost", True)
+        bar = tk.Frame(root, background=BRAND, height=6)
+        bar.pack(fill="x")
+        title = tk.Label(root, text="微信AI智能助理", font=(FONT, 12, "bold"),
+                         background=CARD_BG, foreground=BRAND)
+        title.pack(pady=(16, 2))
         label = f"正在更新到 v{version or '新版本'}，完成后自动打开，请稍候…\n请不要重复双击。"
-        tk.Label(root, text=label, font=("Microsoft YaHei", 10),
-                 padx=28, pady=22).pack()
+        tk.Label(root, text=label, font=(FONT, 10),
+                 background=CARD_BG, foreground=INK,
+                 padx=28, pady=(4, 20)).pack()
         root.update_idletasks()
+        width, height = root.winfo_reqwidth(), root.winfo_reqheight()
+        pos_x = (root.winfo_screenwidth() - width) // 2
+        pos_y = (root.winfo_screenheight() - height) // 2
+        root.geometry(f"{width}x{height}+{pos_x}+{pos_y}")
         root.update()
         import time as _time
         deadline = _time.time() + 3.0
@@ -149,6 +177,11 @@ def _check_and_apply_update() -> bool:
         root.title("微信AI智能助理")
         root.resizable(False, False)
         root.attributes("-topmost", True)
+        try:
+            from wechat_ai_assistant.ui_theme import apply_theme
+            apply_theme(root)
+        except Exception:
+            pass
         body = ttk.Frame(root, padding=(28, 22))
         body.pack(fill="both", expand=True)
         status = ttk.Label(body, text="正在检查客户端更新…", font=("Microsoft YaHei", 10))
@@ -157,7 +190,10 @@ def _check_and_apply_update() -> bool:
         progress.pack(fill="x", pady=(14, 0))
         progress.start(12)
         root.update_idletasks()
-        root.geometry(f"{root.winfo_reqwidth()}x{root.winfo_reqheight()}")
+        _w, _h = root.winfo_reqwidth(), root.winfo_reqheight()
+        _x = (root.winfo_screenwidth() - _w) // 2
+        _y = (root.winfo_screenheight() - _h) // 2
+        root.geometry(f"{_w}x{_h}+{_x}+{_y}")
         cancelled = {"value": False}
 
         def close_window() -> None:
@@ -203,23 +239,44 @@ def _check_and_apply_update() -> bool:
             return False
 
 
-def _fail(title: str, detail: str) -> int:
-    print("=" * 56)
-    print(f"  {title}")
-    print()
-    for line in detail.strip().splitlines():
-        print(f"  {line}")
-    print()
-    print("=" * 56)
+def _show_error_dialog(title: str, detail: str) -> None:
+    """窗口版没有控制台，报错只能弹窗 —— 否则商户看到的是「双击没反应」。"""
     try:
-        input("按回车键关闭…")
-    except (EOFError, KeyboardInterrupt):
+        import tkinter as tk
+        from tkinter import messagebox
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        messagebox.showerror(title, detail.strip())
+        root.destroy()
+    except Exception:
         pass
+
+
+def _fail(title: str, detail: str) -> int:
+    detail = detail.strip()
+    if _HAS_CONSOLE:
+        try:
+            print("=" * 56)
+            print(f"  {title}")
+            print()
+            for line in detail.splitlines():
+                print(f"  {line}")
+            print()
+            print("=" * 56)
+            input("按回车键关闭…")
+            return 1
+        except Exception:
+            # 控制台其实不可用（流被丢弃/重定向）。退回弹窗，别把报错吞掉。
+            pass
+    _show_error_dialog(title, detail)
     return 1
 
 
 def main(argv: list[str] | None = None) -> int:
     """启动商户软件。``--check`` 只做自检。"""
+    _ensure_streams()
     if sys.version_info < (3, 10):
         return _fail(
             "需要更新 Python",

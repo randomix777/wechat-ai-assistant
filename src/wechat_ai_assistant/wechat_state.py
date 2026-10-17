@@ -141,12 +141,11 @@ def _count_nodes(element, seen: set, depth: int, limit: int = 12) -> int:
 
 
 def default_sender_source() -> str:
-    """认人方式默认值：UIA 活着走名单，死了走内存。界面和逻辑都问它。"""
-    try:
-        if uia_automation_available():
-            return "members"
-    except Exception:
-        pass
+    """认人方式默认值：永远 "localdb"（内存 carve，不碰窗口）。
+
+    界面链已移除，UIA 探针的结果不再决定走哪条路（探针本身是只读
+    扫描，留着给登录检测和单测用）。有钥匙时读取层会自动升级 wcdb。
+    """
     return "localdb"
 
 

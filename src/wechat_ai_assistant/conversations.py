@@ -148,16 +148,15 @@ class ConversationSource(Protocol):
 
 
 class RealConversationSource:
-    """真实微信会话列举。
+    """真实微信会话列举，不碰微信窗口。
 
-    三条路，按顺序试：
-    1. 解密库（``wcdb_fn``）：最近会话 + 全量群名 + 人数，全是真名；
-    2. 内存 carve（``localdb``）：不碰微信窗口，UIA 全死时这是唯一路；
-    3. 界面通讯录（``Contacts.get_recent_groups``）：老版本微信才走得通。
+    两条路，按顺序试：
+    1. 解密库（``wcdb_fn``）：最近会话 + 全量群名 + 人数 + 通讯录好友，全是真名；
+    2. 内存 carve（``localdb``）：无钥匙兜底，只能捡到群（名还不全），没有好友。
 
-    解密和内存都只读不写，但仍**必须**在 UI 串行队列里调用，
-    不能和发送、监听并发。任何一条失败都不致命：能列多少列多少，
-    界面会如实说明来源。
+    界面链已移除：以前的第 3 条路（界面通讯录）和好友 UIA 名单都没有了。
+    没钥匙时好友选不到 —— 界面照实说，先提密钥。
+    任何一条失败都不致命：能列多少列多少，界面会如实说明来源。
     """
 
     def __init__(self, ui_lock: Any = None,
@@ -175,14 +174,8 @@ class RealConversationSource:
 
     def list_conversations(self, kind: str = "") -> tuple[Conversation, ...]:
         from . import localdb
-        from .WeChatAuto import Contacts
 
         found: list[Conversation] = []
-        try:
-            from .wechat_state import uia_automation_available
-            uia_ok = uia_automation_available()
-        except Exception:
-            uia_ok = True
         if self.wcdb_fn is not None:
             # 解密库优先：真名 + 人数 + 最近时间，一次到位。
             # 失败（没密钥、文件锁、验签不过）就当没这条路。
@@ -214,7 +207,7 @@ class RealConversationSource:
                 return disambiguate(found)
         memory_groups: list[tuple[str, str]] = []
         if kind in ("", ConversationKind.GROUP):
-            # 内存优先：不碰微信窗口，4.1.15 上 UIA 全死时这是唯一路。
+            # 内存兜底：不碰微信窗口，只能捡到最近碰过的群，名还不全。
             # 人数读不到填 0，界面照群显示，不写"联系人"。
             try:
                 memory_groups = self._guarded(localdb.list_group_conversations) or []
@@ -223,20 +216,7 @@ class RealConversationSource:
             for name, wxid in memory_groups:
                 found.append(Conversation(name=str(name), kind=ConversationKind.GROUP,
                                           member_count=0, wxid=str(wxid)))
-        if kind in ("", ConversationKind.GROUP) and not memory_groups:
-            try:
-                for name, count in self._guarded(Contacts.get_recent_groups, is_maximize=False, close_weixin=False) or ():
-                    found.append(Conversation(name=str(name), kind=ConversationKind.GROUP, member_count=int(count or 0)))
-            except Exception:
-                # 读不到群列表不是致命错误：好友仍然可选，界面会说明。
-                pass
-        if kind in ("", ConversationKind.FRIEND) and uia_ok:
-            # 好友名单只有 UIA 一条路：界面已死就直接跳过，别让人干等超时。
-            try:
-                for name in self._guarded(Contacts.get_friends_info, is_maximize=False, close_weixin=False) or ():
-                    found.append(Conversation(name=str(name), kind=ConversationKind.FRIEND))
-            except Exception:
-                pass
+        # 好友没有内存形态：解密库没给就选不到，界面照实说，先提密钥。
         return disambiguate(found)
 
 

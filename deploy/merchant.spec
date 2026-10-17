@@ -88,7 +88,9 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=True,
+    # 窗口版：不分配控制台，商户双击后只看到软件窗口，没有黑框。
+    # 代价是没有控制台输出，错误改由 launcher 弹 Tk 对话框（launcher._fail）。
+    console=False,
     # 关窗时不要留下「已停止工作」的弹窗。
     disable_windowed_traceback=False,
     argv_emulation=False,

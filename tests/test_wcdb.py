@@ -503,7 +503,7 @@ class HistoryWcdbRoutingTests(unittest.TestCase):
             fake = HistoryWcdbRoutingTests._FakeReader(contact, message)
             history = self._history(fake)
             conv = Conversation(name="群", kind=ConversationKind.GROUP, wxid="g@chatroom")
-            result = history.read([conv], HistoryRange.window("last_day"),
+            result = history.read([conv], HistoryRange.window("last_week"),
                                   merchant_id="m", max_messages=10,
                                   mode=ReadMode.RECENT, sender_source="members")
             self.assertEqual(result.total_messages, 3)  # 文本 + 系统通知 + 图片占位
@@ -553,33 +553,29 @@ class EnsureKeysEncodingTests(unittest.TestCase):
             sender=lambda t, x: None)
         return app, store
 
-    def test_child_forced_utf8_and_bytes_decoded(self):
-        import subprocess
-
-        captured: dict = {}
+    def test_inprocess_extract_no_subprocess_no_console(self):
+        """进程内提取：不走子进程，工具的中文 print 被吞掉（冻结无控制台也不崩）。"""
         tmp = tempfile.TemporaryDirectory(prefix="pyw-ensure-t-")
         try:
             app, store = self._app(tmp.name)
             try:
-                out = "结果: 1/1 salts 找到密钥\n".encode("utf-8")
-
-                def fake_run(*args, **kwargs):
-                    captured.update(kwargs)
-                    return subprocess.CompletedProcess(
-                        args=args[0] if args else (), returncode=0,
-                        stdout=out, stderr=b"")
+                def fake_extract(args):
+                    assert args.db_dir == tmp.name
+                    print("结果: 1/1 salts 找到密钥，还剩中文不会崩")
 
                 with unittest.mock.patch.object(
                         app, "_wcdb_db_storage",
                         return_value=Path(tmp.name)), \
-                    unittest.mock.patch("subprocess.run", side_effect=fake_run), \
+                    unittest.mock.patch(
+                        "wechat_ai_assistant._wcdb_key_tool.cmd_extract",
+                        side_effect=fake_extract), \
                     unittest.mock.patch.object(
-                        app, "wcdb_status", return_value=(True, "ok")):
+                        app, "wcdb_status", return_value=(True, "ok")), \
+                    unittest.mock.patch(
+                        "subprocess.run",
+                        side_effect=AssertionError("不该再起子进程")):
                     ok, _message = app.ensure_wcdb_keys()
                 self.assertTrue(ok)
-                env = captured.get("env") or {}
-                self.assertEqual(env.get("PYTHONUTF8"), "1")
-                self.assertNotIn("text", captured)  # 不走 locale 解码
             finally:
                 app.close()
                 store.close()
@@ -588,6 +584,34 @@ class EnsureKeysEncodingTests(unittest.TestCase):
                 tmp.cleanup()
             except PermissionError:
                 pass  # Windows 文件锁（后台线程刚放手），下次系统清
+
+    def test_extract_exit_code_surfaces_as_failure(self):
+        """工具 sys.exit(非0) → 返回失败而不是往下走。"""
+        tmp = tempfile.TemporaryDirectory(prefix="pyw-ensure-t-")
+        try:
+            app, store = self._app(tmp.name)
+            try:
+                def fake_extract(args):
+                    import sys as _sys
+                    _sys.exit(1)
+
+                with unittest.mock.patch.object(
+                        app, "_wcdb_db_storage",
+                        return_value=Path(tmp.name)), \
+                    unittest.mock.patch(
+                        "wechat_ai_assistant._wcdb_key_tool.cmd_extract",
+                        side_effect=fake_extract):
+                    ok, message = app.ensure_wcdb_keys()
+                self.assertFalse(ok)
+                self.assertIn("没成功", message)
+            finally:
+                app.close()
+                store.close()
+        finally:
+            try:
+                tmp.cleanup()
+            except PermissionError:
+                pass
 
 
 class RefreshAutoEnsureTests(unittest.TestCase):

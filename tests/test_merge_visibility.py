@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+import ast
 import sys
 import unittest
 from pathlib import Path
@@ -49,8 +50,21 @@ class MergeVisibilityTests(unittest.TestCase):
         self.assertIn("on_merged", self.source)
 
     def test_the_merge_line_is_on_screen(self):
-        self.assertIn("listen_merged", self.code)
+        """那句话要贴在**商户真会看的那一屏**上，而且真被调用。
+
+        原先它挂在「持续监听」页的标签上。监听整块移除后，那句话没地方贴了
+        —— 商户的疑问还在（三条消息一张订单，像漏单），答案却没了。
+        所以这里不认控件名，认「整理结果那一屏确实调了它」。
+        """
         self.assertIn("合成一条整理", self.code)
+        self.assertIn("内容没丢", self.source)
+        tree = ast.parse(self.source)
+        render = next(node for node in ast.walk(tree)
+                      if isinstance(node, ast.FunctionDef)
+                      and node.name == "_render_analysis_results")
+        called = {node.func.attr for node in ast.walk(render)
+                  if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)}
+        self.assertIn("_merge_note", called, "整理结果那一屏没有把合并这件事说出来")
 
 
 class MergeCountWordingTests(unittest.TestCase):

@@ -31,6 +31,17 @@
 
     .\\.venv\\Scripts\\python.exe -X utf8 -m wechat_ai_assistant.web_dev
     # 然后浏览器打开 http://127.0.0.1:8765
+    # 或者双击仓库根目录的「启动开发Web界面.bat」（会带 --open 自动开浏览器）
+
+## 改页面：保存即生效
+
+页面是 ``web_page.py`` 里的一个字符串常量（不是静态文件，见那边的说明）。
+本模块**按文件时间戳重载它**：改 ``web_page.py`` 保存后，浏览器会自己刷新，
+不用重启服务，也不用手动 F5。
+
+用 Chrome DevTools 在 Styles 面板里实时改样式（不落盘）时**不会**被刷新掉 ——
+自动刷新只在 ``web_page.py`` 真的变了才触发。调好了把值抄回 ``web_page.py``
+的 ``<style>`` 里保存，就固化了。
 """
 from __future__ import annotations
 
@@ -55,6 +66,61 @@ DEFAULT_PORT = 8765
 
 #: 日志面板留多少行。多了浏览器会卡，而调试看最近的���百行足够。
 LOG_LINES = 300
+
+#: 页面就在旁边。改它之后不必重启服务 —— 见 :func:`page_html`。
+PAGE_SOURCE = Path(__file__).with_name("web_page.py")
+
+#: 改页面时浏览器自动刷新。**只在文件真的变了才刷**，所以用 DevTools 手改样式
+#: （不落盘）时不会被刷掉。只在开发界面注入，产品包里没有这个模块。
+LIVE_RELOAD = """
+<script>
+(function () {
+  let seen = null;
+  setInterval(async function () {
+    try {
+      const r = await fetch("/api/page-version");
+      const v = (await r.json()).version;
+      if (seen === null) { seen = v; return; }
+      if (v !== seen) { location.reload(); }
+    } catch (e) { /* 服务重启中，下一次轮询会连上 */ }
+  }, 700);
+})();
+</script>
+"""
+
+_page_mtime: str | None = None
+
+
+def _page_mtime_ns() -> str:
+    try:
+        return str(PAGE_SOURCE.stat().st_mtime_ns)
+    except OSError:
+        return ""
+
+
+def page_html(data_dir: str) -> str:
+    """当前的页面 HTML。``web_page.py`` 一变就重新加载它。
+
+    改样式的人不该为了看一眼而重启服务、手动刷新。这里按文件时间戳重载模块，
+    页面再靠 :data:`LIVE_RELOAD` 定时问 ``/api/page-version``，变了就自己刷新。
+    改坏了（语法错误）也**不能把页面弄没**：重载失败就继续用旧页面。
+    """
+    global _page_mtime
+    from importlib import reload
+
+    from . import web_page
+
+    mtime = _page_mtime_ns()
+    if mtime and mtime != _page_mtime:
+        try:
+            web_page = reload(web_page)
+            _page_mtime = mtime
+        except Exception:  # pragma: no cover - 编辑中，文件暂时是坏的
+            LOGGER.exception("web_page.py 重载失败，继续用旧页面")
+    # 数据目录由服务端注入。它不能从 /api/state 拿——那是「服务运行中」的事。
+    # 而目录错了正好表现为「没数据 / 未登录」，不显示出来没人会往哪找。
+    html = web_page.PAGE.replace("__DATADIR__", data_dir or "（未知）")
+    return html.replace("</body>", LIVE_RELOAD + "\n</body>")
 
 
 class WebState:
@@ -286,12 +352,10 @@ class DevHandler(BaseHTTPRequestHandler):
             return
         path = self.path.split("?", 1)[0]
         if path in ("/", "/index.html"):
-            from .web_page import PAGE
-
-            # 数据目录由服务端注入。它不能从 /api/state 拿——
-            # 那是「服务运行中」的事。而目录错了正好表现为
-            # 「没数据 / 未登录」，不显示出来没人会往哪找。
-            self._send_html(200, PAGE.replace("__DATADIR__", self.data_dir or "（未知）"))
+            self._send_html(200, page_html(self.data_dir))
+        elif path == "/api/page-version":
+            # 页面靠它判断 web_page.py 有没有被改过，改了才刷新。
+            self._send_json(200, {"version": _page_mtime_ns()})
         elif path == "/api/state":
             self._send_json(200, self.state.snapshot())
         elif path == "/api/conversations":
@@ -526,6 +590,8 @@ def main(argv: list[str] | None = None) -> int:
                                      description="\u5f00\u53d1\u8c03\u8bd5\u7528\u7684 Web \u754c\u9762")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--data-dir", default="")
+    parser.add_argument("--open", action="store_true",
+                        help="服务就绪后自动打开浏览器（启动要先取密钥，可能要等几十秒）")
     parser.add_argument("--gateway", default=os.environ.get("WECHAT_AI_GATEWAY_URL", DEFAULT_GATEWAY))
     args = parser.parse_args(argv)
 
@@ -543,6 +609,10 @@ def main(argv: list[str] | None = None) -> int:
                             device_name=default_device_name())
     server = create_server(app, port=args.port)
     host, port = server.server_address[:2]
+    if args.open:
+        import webbrowser
+
+        webbrowser.open(f"http://{host}:{port}/")
     print(f"\u5f00\u53d1\u754c\u9762\u5df2\u542f\u52a8\uff1ahttp://{host}:{port}")
     print("\u53ea\u5141\u8bb8\u672c\u673a\u8bbf\u95ee\u3002\u6309 Ctrl+C \u505c\u6b62\u3002")
     try:

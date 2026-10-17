@@ -1,4 +1,4 @@
-"""读群聊历史必须把**群成员**一起传下去，否则认不出发送人。
+"""群聊历史：成员名单只在**注入读取器**那条路上用；界面链已移除。
 
 ## 出过什么事
 
@@ -11,19 +11,16 @@
 
 不传的时候，读取器只能靠「开多选遍历一次、不开再遍历一次」两份结果对比，
 从文本前缀里把发送人切出来；那一步对不上就返回 ``None``，最终落到
-``'红包或转账(无法获取发送人)'`` 这个**固定占位串** —— 每条消息的发送人
-都是它，商户看到的就是一堆不知道谁说的话。
-
-同一份群成员，项目里别的路径**都传了**：
-
-* ``live_listen``（持续监听）→ ``groupMembers=list(self.group_members)``
-* ``agent``（采集器）→ ``groupMembers=list(self.config.group_members)``
-* ``history_read``（读历史）→ ``groupMembers=[]`` ← 只有这里漏了
+``'红包或转账(无法获取发送人)'`` 这个**固定占位串**。
 
 ## 现在的行为
 
-* 群聊 → 取一次成员昵称并**按会话缓存**，之后复用
-* 单聊 → 不取（没有成员名单这回事）
+界面链（翻微信窗口读历史）已移除，成员名单这条路只剩「注入读取器」
+（测试替身、外部集成）时会用到；生产默认走解密库/内存，
+发送人靠 wxid 反查真名，不需要成员名单。
+
+* 群聊 + members + 注入读取器 → 取一次成员昵称并**按会话缓存**，之后复用
+* 单聊 → 没有成员名单这回事，不取；没钥匙就明说走解密库
 * 取失败 → 退回空列表，**不让整次读取失败**（认不出人 ≠ 读不到消息）
 """
 from __future__ import annotations
@@ -62,7 +59,11 @@ class MembersArePassedTests(unittest.TestCase):
         self.assertEqual(self.calls[-1]["groupMembers"], ["张姐", "李叔"],
                          "\u7fa4\u804a\u6ca1\u628a\u6210\u5458\u4f20\u4e0b\u53bb \u2014\u2014 \u8ba4\u4e0d\u51fa\u53d1\u9001\u4eba")
 
-    def test_a_direct_chat_does_not_ask_for_members(self):
+    def test_a_direct_chat_needs_the_wcdb_key(self):
+        """单聊没有内存形态：members（注入读取器）那条路也救不了它。
+
+        以前这里能悄悄开窗读，界面链移除后必须明说让商户提密钥。
+        """
         asked = []
 
         def members(conv):
@@ -70,9 +71,11 @@ class MembersArePassedTests(unittest.TestCase):
             return ["不该被叫到"]
 
         reader = HistoryReader(self.reader, group_members=members, sender_source="members")
-        reader._read_one(self.friend, 20)
-        self.assertEqual(self.calls[-1]["groupMembers"], [])
-        self.assertEqual(asked, [], "\u5355\u804a\u6ca1\u6709\u6210\u5458\u540d\u5355\u8fd9\u56de\u4e8b\uff0c\u4e0d\u8be5\u53bb\u53d6")
+        with self.assertRaises(RuntimeError) as ctx:
+            reader._read_one(self.friend, 20)
+        self.assertIn("重新提取密钥", str(ctx.exception))
+        self.assertEqual(asked, [], "单聊没有成员名单这回事，不该去取")
+        self.assertEqual(self.calls, [], "也不该拿注入读取器去开窗读")
 
     def test_members_are_asked_for_once_per_conversation(self):
         asked = []
@@ -131,18 +134,18 @@ class WiringTests(unittest.TestCase):
         self.assertIn("group_members_fn", source,
                       "\u5fc5\u987b\u80fd\u6ce8\u5165\uff0c\u5426\u5219\u6d4b\u8bd5\u88ab\u771f\u5fae\u4fe1\u62d6\u6162")
 
-    def test_the_resolver_uses_the_real_contacts_api(self):
-        tree = ast.parse(APPLICATION.read_text(encoding="utf-8"))
-        fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
-                  and n.name == "_default_group_members")
-        self.assertIn("get_groupMembers_info", ast.unparse(fn))
+    def test_the_resolver_does_not_touch_the_wechat_window(self):
+        """默认解析器已退化成空实现：界面链移除后它不许再碰微信。
 
-    def test_the_resolver_does_not_raise(self):
-        """取成员要开微信界面，可能超时。不能让它把读取带崩。"""
+        注入 `group_members_fn` 的集成方自带实现，这里只管默认那个。
+        """
         tree = ast.parse(APPLICATION.read_text(encoding="utf-8"))
         fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
                   and n.name == "_default_group_members")
-        self.assertTrue(any(isinstance(n, ast.Try) for n in ast.walk(fn)))
+        body = ast.unparse(fn)
+        for gone in ("get_groupMembers_info", "Contacts", "Navigator", "WeChatAuto"):
+            self.assertNotIn(gone, body, f"_default_group_members 又在开窗：{gone}")
+        self.assertIn("return []", body)
 
     def test_every_reader_path_passes_members(self):
         """静态核查：不该再有**调用处**把群成员写死成空。

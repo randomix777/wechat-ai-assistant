@@ -771,9 +771,9 @@ class LocalAgent:
             return []
         reader = self.history_reader
         if reader is None:
-            from .WeChatAuto import Messages
-
-            reader = lambda **kwargs: Messages.dump_chat_history(**kwargs)
+            # 界面链已移除：没有注入读取器就不读。以前这里回退到
+            # 直接翻微信窗口读历史，已删除。
+            raise RuntimeError("界面读取已移除：请注入 history_reader（解密库/内存）")
         with _UI_OPERATION_LOCK:
             return list(
                 reader(
@@ -792,9 +792,8 @@ class LocalAgent:
     def _open_dialog(self) -> Any:
         opener = self.dialog_opener
         if opener is None:
-            from .WeChatTools import Navigator
-
-            opener = Navigator.open_seperate_dialog_window
+            # 界面链已移除：不会再打开微信聊天窗口。
+            raise RuntimeError("界面操作已移除：请注入 dialog_opener，否则无法监听")
         from .Errors import NoSuchFriendError
 
         last_error = None
@@ -822,9 +821,8 @@ class LocalAgent:
     ) -> dict[str, Any]:
         listener = self.listener
         if listener is None:
-            from .WeChatAuto import Monitor
-
-            listener = Monitor.listen_on_chat
+            # 界面链已移除：不再开窗监听。注入 listener 才能用（测试替身）。
+            raise RuntimeError("持续监听已移除：请注入 listener，否则无法监听")
         return listener(
             dialog_window=dialog,
             duration=self.config.listen_duration,
@@ -842,13 +840,9 @@ class LocalAgent:
             raise PermissionError("command target is not allowed by the agent")
         sender = self.sender
         if sender is None:
-            from .WeChatAuto import Messages
-
-            sender = lambda friend, messages: Messages.send_messages_to_friend(
-                friend=friend,
-                messages=messages,
-                close_weixin=False,
-            )
+            # 界面链已移除：没有注入 sender 就不发。以前这里回退到
+            # 直接操作微信窗口发送（清空草稿、抢焦点），已删除。
+            raise RuntimeError("自动发送已移除：只整理不发送，没有可用的发送实现")
         if command.action == "send_text":
             text = str(command.payload.get("text", ""))
             if not text.strip():

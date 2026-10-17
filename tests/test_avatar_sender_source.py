@@ -1,10 +1,10 @@
-"""头像发送人链路的回归测试：读历史时到底走成员名单还是逐条点头像。
+"""发送人来源路由的回归测试：界面链移除后 avatar/members 各走哪。
 
-背景：4.x 消息正文里没有发送人名，成员名单匹配全军覆没（全是占位串）。
-``sender_source="avatar"`` 让群聊走 ``Messages.dump_senders_via_avatar``，
-逐条点头像读资料卡。
+背景：以前群聊走 ``Messages.dump_senders_via_avatar`` 逐条点头像，
+又慢又抢焦点，已删除。现在 avatar 按 localdb（内存）走，
+members 只剩"注入的读取器"含义（测试替身用），生产默认 localdb。
 
-本文件只测路由与适配（纯内存，不建微信窗口、不联网）。
+本文件只测路由（纯内存，不建微信窗口、不联网）。
 """
 from __future__ import annotations
 
@@ -45,38 +45,29 @@ AVATAR_RECORDS = [
 
 
 class AvatarRoutingTests(unittest.TestCase):
-    def test_default_is_members_upstream_design(self):
+    def test_default_is_localdb(self):
         reader = HistoryReader(_reader([]))
-        self.assertEqual(reader._sender_source, "members")
+        self.assertEqual(reader._sender_source, "localdb")
 
-    def test_avatar_mode_group_uses_avatar_not_members(self):
-        dump = _reader([])
-        members_calls = []
+    def test_avatar_mode_group_falls_back_to_localdb(self):
+        """avatar 已移除：群聊按内存路走，不再点头像。"""
         reader = HistoryReader(
-            dump, group_members=lambda conv: members_calls.append(conv) or ["张老板"],
+            _reader([]),
+            group_members=lambda conv: ["张老板"],
             sender_source="avatar",
         )
-        with patch("wechat_ai_assistant.WeChatAuto.Messages.dump_senders_via_avatar",
-                   return_value=list(AVATAR_RECORDS)) as avatar:
+        sentinel = [{"消息发送人": "x", "来源": "localdb"}]
+        with patch.object(HistoryReader, "_read_via_localdb",
+                          return_value=list(sentinel)) as local:
             got = reader._read_one(_group(), 50)
-        self.assertEqual(avatar.call_count, 1)
-        self.assertEqual(avatar.call_args.kwargs["friend"], "测试群")
-        self.assertEqual(dump.calls, [], "成员名单那条路不该再跑")
-        self.assertEqual(members_calls, [], "成员名单都不该去取")
-        self.assertEqual(got[0]["消息发送人"], "苹果哥(张老板)")
-        self.assertEqual(got[0]["昵称"], "张老板")
-        self.assertEqual(got[0]["备注"], "苹果哥")
-        self.assertEqual(got[0]["消息内容"], "两箱苹果")
+        self.assertEqual(local.call_count, 1)
+        self.assertEqual(got, sentinel)
 
-    def test_avatar_mode_private_chat_stays_on_dump(self):
-        dump = _reader([{"消息发送人": "张老板", "消息内容": "你好",
-                         "消息类型": "文本", "消息发送时间": "2026-10-2 12:21"}])
-        reader = HistoryReader(dump, sender_source="avatar")
-        with patch("wechat_ai_assistant.WeChatAuto.Messages.dump_senders_via_avatar") as avatar:
-            got = reader._read_one(_friend(), 50)
-        self.assertEqual(avatar.call_count, 0)
-        self.assertEqual(len(dump.calls), 1)
-        self.assertEqual(got[0]["消息发送人"], "张老板")
+    def test_avatar_mode_private_chat_needs_wcdb_key(self):
+        """私聊没有内存形态：没钥匙就明说，不再回落界面链。"""
+        reader = HistoryReader(_reader([]), sender_source="avatar")
+        with self.assertRaises(RuntimeError):
+            reader._read_one(_friend(), 50)
 
     def test_members_mode_unchanged(self):
         rows = [{"消息发送人": "张老板", "消息内容": "两箱",
@@ -92,14 +83,17 @@ class AvatarRoutingTests(unittest.TestCase):
         self.assertEqual(dump.calls[0]["groupMembers"], ["张老板"])
         self.assertEqual(got, rows)
 
-    def test_unknown_sender_source_falls_back_to_members(self):
+    def test_unknown_sender_source_falls_back_to_localdb(self):
         dump = _reader([])
         reader = HistoryReader(dump, group_members=lambda conv: [], sender_source="whatever")
-        self.assertEqual(reader._sender_source, "members")
-        with patch("wechat_ai_assistant.WeChatAuto.Messages.dump_senders_via_avatar") as avatar:
-            reader._read_one(_group(), 5)
-        self.assertEqual(avatar.call_count, 0)
-        self.assertEqual(len(dump.calls), 1)
+        self.assertEqual(reader._sender_source, "localdb")
+        sentinel = [{"消息发送人": "x", "来源": "localdb"}]
+        with patch.object(HistoryReader, "_read_via_localdb",
+                          return_value=list(sentinel)) as local:
+            got = reader._read_one(_group(), 5)
+        self.assertEqual(local.call_count, 1)
+        self.assertEqual(got, sentinel)
+        self.assertEqual(dump.calls, [], "注入的 members 路不该再跑")
 
 
 class AvatarCardCopyTests(unittest.TestCase):

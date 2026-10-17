@@ -240,10 +240,11 @@ class VoteNameTests(unittest.TestCase):
 
         group = Conversation(name="水果群", kind=ConversationKind.GROUP)
         reader = HistoryReader(dump, group_members=lambda conv: [], sender_source="localdb")
-        with patch.object(localdb, "resolve_group_wxid", return_value=None), \
-             patch.object(HistoryReader, "_page_in_history", return_value=None):
-            reader._read_one(group, 10)
-        self.assertEqual(len(dump_calls), 1, "wxid 解不出必须回落老链路")
+        with patch.object(localdb, "resolve_group_wxid", return_value=None):
+            with self.assertRaises(RuntimeError) as ctx:
+                reader._read_one(group, 10)
+        self.assertIn("重新提取密钥", str(ctx.exception), "解不出 wxid 要给可执行的下一步")
+        self.assertEqual(dump_calls, [], "界面链已移除，不许再回落开窗读取")
 
     def test_history_reader_localdb_adapts_records(self):
         from unittest.mock import patch
@@ -258,8 +259,7 @@ class VoteNameTests(unittest.TestCase):
             content="两箱苹果", timestamp=1791828020)
         with patch.object(localdb, "resolve_group_wxid", return_value="6255144087@chatroom"), \
              patch.object(localdb, "read_conversation", return_value=[message]), \
-             patch.object(localdb, "resolve_contact_name", return_value="张老板"), \
-             patch.object(HistoryReader, "_page_in_history", return_value=None):
+             patch.object(localdb, "resolve_contact_name", return_value="张老板"):
             got = reader._read_one(group, 10)
         self.assertEqual(len(got), 1)
         self.assertEqual(got[0]["消息发送人"], "张老板")
@@ -306,9 +306,7 @@ class VoteNameTests(unittest.TestCase):
                  unittest.mock.patch.object(
                     localdb, "read_conversation", return_value=[message]), \
                  unittest.mock.patch.object(
-                    localdb, "resolve_contact_name", return_value=sender), \
-                 unittest.mock.patch.object(
-                    HistoryReader, "_page_in_history", return_value=None):
+                    localdb, "resolve_contact_name", return_value=sender):
                 from wechat_ai_assistant.conversations import Conversation, ConversationKind
                 got = reader._read_one(
                     Conversation(name="群", kind=ConversationKind.GROUP), 10)
@@ -447,7 +445,8 @@ class GroupListTests(unittest.TestCase):
                 groups = source.list_conversations(ConversationKind.GROUP)
         self.assertEqual([(c.name, c.wxid) for c in groups], [("水果群", "g@chatroom")])
 
-    def test_memory_miss_falls_back_to_ui(self):
+    def test_memory_miss_does_not_touch_the_wechat_window(self):
+        """内存捡不到就如实返回空：界面链已移除，绝不回落开窗翻通讯录。"""
         from unittest.mock import patch
 
         from wechat_ai_assistant.conversations import ConversationKind, RealConversationSource
@@ -455,9 +454,9 @@ class GroupListTests(unittest.TestCase):
         source = RealConversationSource(ui_lock=None)
         with patch.object(localdb, "list_group_conversations", return_value=[]):
             with patch("wechat_ai_assistant.WeChatAuto.Contacts.get_recent_groups",
-                       return_value=[("老群", 10)]):
+                       side_effect=AssertionError("界面链已移除，不许碰微信窗口")):
                 groups = source.list_conversations(ConversationKind.GROUP)
-        self.assertEqual([(c.name, c.member_count) for c in groups], [("老群", 10)])
+        self.assertEqual(list(groups), [], "捡不到就是捡不到，不能编")
 
 
 class GroupTitleTests(unittest.TestCase):
@@ -479,20 +478,14 @@ class GroupTitleTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(localdb.extract_group_name_from_title(text), "")
 
-    def test_empty_alias_key_is_rejected(self):
+    def test_reader_no_longer_takes_an_alias_recorder(self):
+        """抓面板标题解群名的旧挂钩已随界面链移除，不许再加回 HistoryReader。"""
+        import inspect
+
         from wechat_ai_assistant.history_read import HistoryReader
 
-        recorded: list[tuple[str, str]] = []
-        reader = HistoryReader(lambda **kw: [], alias_recorder=lambda w, n: recorded.append((w, n)))
-        # 标题里解群名失败时，不该调用 recorder
-        with unittest.mock.patch.object(HistoryReader, "_page_in_history", return_value="乱标题"), \
-             unittest.mock.patch.object(HistoryReader, "_page_in_members", return_value=None), \
-             unittest.mock.patch.object(localdb, "resolve_group_wxid",
-                                        return_value="123@chatroom"):
-            from wechat_ai_assistant.conversations import Conversation, ConversationKind
-            reader._read_one(
-                Conversation(name="水果群", kind=ConversationKind.GROUP), 10)
-        self.assertEqual(recorded, [])
+        self.assertNotIn("alias_recorder",
+                         inspect.signature(HistoryReader.__init__).parameters)
 
 
 if __name__ == "__main__":

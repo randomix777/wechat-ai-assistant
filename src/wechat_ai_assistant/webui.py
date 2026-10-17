@@ -87,20 +87,26 @@ LOGIN_PAGE_HTML = _page(
     """
 <h1>商家登录</h1>
 <p>请输入运营人员提供的账号和密码。</p>
+<form id="loginForm">
 <label for="u">账号</label><input id="u" autocomplete="username" autofocus>
 <label for="p">密码</label><input id="p" type="password" autocomplete="current-password">
-<button class="primary" id="go">登录</button>
-<div class="msg" id="m"></div>
+<label class="hint" style="margin-top:8px"><input id="showPw" type="checkbox" style="width:auto"> 显示密码</label>
+<button class="primary" id="go" type="submit">登录</button>
+</form>
+<div class="msg" id="m" role="status" aria-live="polite"></div>
 <p class="hint">如果这是您第一次登录，登录后系统会引导您修改初始密码。</p>
 <script>
 const m=document.getElementById('m');
-document.getElementById('go').onclick=async function(){
+document.getElementById('showPw').onchange=function(){document.getElementById('p').type=this.checked?'text':'password'};
+async function doLogin(){
   m.style.display='none';
   const r=await post('/v1/web/login',{username:document.getElementById('u').value,
     password:document.getElementById('p').value});
   if(!r.ok){show(m,r.data.message||'账号或密码不正确',true);return;}
   location.href='/device';
-};
+}
+document.getElementById('go').onclick=doLogin;
+document.getElementById('loginForm').onsubmit=function(e){e.preventDefault();doLogin();};
 </script>
 """,
 )
@@ -144,13 +150,17 @@ def render_device_entry(merchant: str) -> str:
 <p>商家：<strong>{{merchant}}</strong></p>
 <p>请在电脑上的软件中点击“登录”，然后把软件上显示的验证码输入到下面的输入框。</p>
 <label for="code">验证码</label>
-<input id="code" placeholder="例如：BCDF-2345" maxlength="9" style="text-transform:uppercase">
-<button class="primary" id="go">下一步</button>
-<div class="msg" id="m"></div>
+<form id="codeForm">
+<input id="code" placeholder="例如：BCDF-2345" maxlength="9" style="text-transform:uppercase" autocomplete="one-time-code">
+<button class="primary" id="go" type="submit">下一步</button>
+</form>
+<div class="msg" id="m" role="status" aria-live="polite"></div>
 <script>
-document.getElementById('go').onclick=function(){
+function goCode(){
   location.href='/device?code='+encodeURIComponent(document.getElementById('code').value.trim().toUpperCase());
-};
+}
+document.getElementById('go').onclick=goCode;
+document.getElementById('codeForm').onsubmit=function(e){e.preventDefault();goCode();};
 </script>
 """,
             merchant=html.escape(merchant),
