@@ -94,6 +94,11 @@ def _show_update_splash(version: str) -> None:
     root = None
     try:
         root = tk.Tk()
+        try:  # 更新窗口也要是自家脸，不然看起来像个可疑弹窗。
+            from wechat_ai_assistant.ui_theme import set_window_icon
+            set_window_icon(root)
+        except Exception:
+            pass
         root.title("微信AI智能助理 - 正在更新")
         root.resizable(False, False)
         root.configure(background=CARD_BG)
@@ -178,8 +183,9 @@ def _check_and_apply_update() -> bool:
         root.resizable(False, False)
         root.attributes("-topmost", True)
         try:
-            from wechat_ai_assistant.ui_theme import apply_theme
+            from wechat_ai_assistant.ui_theme import apply_theme, set_window_icon
             apply_theme(root)
+            set_window_icon(root)
         except Exception:
             pass
         body = ttk.Frame(root, padding=(28, 22))

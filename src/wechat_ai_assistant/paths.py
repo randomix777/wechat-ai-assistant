@@ -90,3 +90,25 @@ def default_data_dir() -> Path:
     if new_path.exists() or not old_path.exists():
         return new_path
     return old_path
+
+
+def asset_path(name: str) -> Path | None:
+    """Locate a bundled static asset (currently the window icon).
+
+    Packaged builds put it under ``sys._MEIPASS``/``assets`` (PyInstaller
+    extracts ``datas`` there); a source checkout keeps it in ``deploy/assets``.
+    Returns ``None`` when neither exists: a missing icon must never stop a
+    merchant's app from starting.
+    """
+    candidates: list[Path] = []
+    bundle = getattr(sys, "_MEIPASS", None)
+    if bundle:
+        candidates.append(Path(bundle) / "assets" / name)
+    candidates.append(Path(__file__).resolve().parents[2] / "deploy" / "assets" / name)
+    for path in candidates:
+        try:
+            if path.is_file():
+                return path
+        except OSError:
+            continue
+    return None

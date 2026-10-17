@@ -63,12 +63,18 @@ EXCLUDES = [
     "pandas", "matplotlib", "setuptools",
 ]
 
+#: 图标干两件事：写进 exe 资源（任务栏 / Alt-Tab / 文件图标），并作为 datas
+#: 随包分发，运行时的窗口图标由 ``ui_theme.set_window_icon`` 从这里读。
+#: 由 ``python deploy/build_icon.py --final b`` 生成，换方向改这一个文件即可。
+ICON = ROOT / "deploy" / "assets" / "app.ico"
+DATAS = [(str(ICON), "assets")] if ICON.is_file() else []
+
 a = Analysis(
     [str(ROOT / "src" / "wechat_ai_assistant" / "launcher.py")],
     pathex=[str(ROOT / "src")]
     + [str(p) for p in sorted((ROOT / "packages").glob("*/src"))],
     binaries=[],
-    datas=[],
+    datas=DATAS,
     hiddenimports=HIDDEN,
     hookspath=[],
     hooksconfig={},
@@ -88,6 +94,8 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
+    # 任务栏、Alt-Tab、资源管理器里显示的那张脸。
+    icon=str(ICON) if ICON.is_file() else None,
     # 窗口版：不分配控制台，商户双击后只看到软件窗口，没有黑框。
     # 代价是没有控制台输出，错误改由 launcher 弹 Tk 对话框（launcher._fail）。
     console=False,

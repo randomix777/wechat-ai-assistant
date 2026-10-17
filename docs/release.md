@@ -25,6 +25,21 @@ Copy-Item deploy\启动微信AI智能助理.bat dist\微信AI智能助理\启动
 便携版的数据保存在同级 `data/`，复制整个文件夹即可备份或迁移。自动更新会保留该目录。
 请解压到普通可写目录；Windows 加密的登录凭证换电脑后需要重新登录。
 
+### 图标：不要手改位图
+
+`deploy/assets/app.ico`（多尺寸）与 `app.png` 由 `deploy/build_icon.py` **自己画**：
+按 4 倍超采样出图再降采样，所以 Windows 真正会用的 16/24/32 px 不糊；
+配色取自界面主题（`ui_theme.BRAND` 品牌绿、`INK` 深墨），和软件是同一套颜色。
+`deploy/merchant.spec` 里 `icon=` 把它写进 exe 资源（任务栏 / Alt-Tab / 文件图标），
+`datas` 把它随包分发，运行时的窗口图标由 `ui_theme.set_window_icon` 读。
+
+```powershell
+.\.venv\Scripts\python.exe deploy\build_icon.py             # 出三个方向 + 桌面尺寸预览
+.\.venv\Scripts\python.exe deploy\build_icon.py --final b   # 定稿方向 b 并导出 ico/png
+```
+
+方向在 `build_icon.py` 的 `DIRECTIONS` 里，加一个函数就是一个新方向。
+
 发版前冒烟：双击 `dist/微信AI智能助理/微信AI智能助理.exe`，
 走一遍"登录 → 选群 → 读历史"，标题栏版本号对得上才算数。
 

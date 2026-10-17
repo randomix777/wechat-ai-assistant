@@ -461,6 +461,11 @@ class MerchantWindow:
         )
 
         self.root = tk.Tk()
+        try:  # 图标是锦上添花，缺了不能拦住开店。
+            from .ui_theme import set_window_icon
+            set_window_icon(self.root)
+        except Exception:
+            pass
         try:
             from .version import __version__ as _app_version
         except Exception:

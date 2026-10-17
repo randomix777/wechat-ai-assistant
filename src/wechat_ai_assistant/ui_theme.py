@@ -353,9 +353,41 @@ class Stepper:
                 label.configure(style="Muted.TLabel")
 
 
+#: iconphoto 的 PhotoImage 必须留一份引用，否则被 GC 收走、图标又变回默认羽毛。
+_ICON_IMAGES: list[Any] = []
+
+
+def set_window_icon(window: Any) -> None:
+    """给窗口挂上产品图标；找不到图标或系统不认就保持默认，绝不打断启动。
+
+    任务栏和 Alt-Tab 用的是 exe 自己的图标（`deploy/merchant.spec` 里的
+    ``icon=``），这里管的是窗口那一份 —— 开发态直接跑源码时也认得出是
+    我们的程序，而不是 Python 自带的羽毛。
+    """
+    try:
+        from .paths import asset_path
+    except Exception:  # pragma: no cover - 极端裁剪环境
+        return
+    ico = asset_path("app.ico")
+    if ico is not None:
+        try:
+            window.iconbitmap(default=str(ico))
+            return
+        except Exception:
+            pass
+    png = asset_path("app.png")
+    if png is not None:
+        try:
+            image = tk.PhotoImage(file=str(png))
+            _ICON_IMAGES.append(image)
+            window.iconphoto(True, image)
+        except Exception:
+            pass
+
+
 __all__ = [
     "APP_BG", "BODY_BOLD", "BODY_FONT", "BRAND", "BRAND_DARK", "BRAND_TINT",
     "CARD_BG", "DANGER", "DANGER_TINT", "GOOD", "INK", "LINE", "MUTED",
     "SECONDARY", "STEPS", "WARN", "WARN_TINT",
-    "Stepper", "apply_theme", "card",
+    "Stepper", "apply_theme", "card", "set_window_icon",
 ]
