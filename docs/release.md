@@ -82,6 +82,29 @@ Compress-Archive -Path "dist\微信AI智能助理" `
 * 缺清单、签名不对、清单版本与 Release 对不上 → 一律拒绝更新。**所以漏了这一步，
   新客户端收不到这次更新**（老客户端仍然照 `.sha256` 走）。
 
+### 4.1 私钥只存在 worker 里（在线签名服务）
+
+不想让私钥留在发版机器上时，把它交给 JYI worker（`worker/release-sign.ts`，
+两个 secret：`RELEASE_SIGN_JWK` = 私钥的 JWK，`RELEASE_SIGN_TOKEN` = 进门口令）：
+
+```powershell
+# 一次性：把私钥转成 WebCrypto 的 JWK 喂给 worker（在拿到私钥的那台机器上跑一次）
+.\.venv\Scripts\python.exe deploy\sign_release.py export-jwk |
+  npx wrangler secret put RELEASE_SIGN_JWK
+
+# 每次发版：清单仍在本机生成，只把清单字节发给签名路由，签名拿回来本机先验一遍
+$env:RELEASE_SIGN_TOKEN = "<自己生成的长随机串>"
+.\.venv\Scripts\python.exe deploy\sign_release.py sign "微信AI智能助理-win64-$ver.zip" `
+  --version $ver --remote https://ai.jyisolutions.com/api/internal/release/sign
+```
+
+* 信任根没变：客户端认的还是源码里钉死的 `PUBLISHER_PUBKEY`。签名服务自称的公钥与它不一致、
+  或签名在本机验不过，`sign` 立刻中止且**什么都不落盘** —— 在线服务被换掉也发不出坏包。
+* `export-jwk` 的标准输出**就是私钥**：别重定向进日志、别贴进聊天、别提交。
+* worker 只回 `{"signature": "<base64 的 raw r||s>", "public_key": "<128 位 hex>"}`。
+* 两端算法一致性已做过互通性自检：Node/WebCrypto 签 → Python/CNG 验通过（ECDSA P-256 +
+  SHA-256 + raw `r||s`）。
+
 ## 5. 发 Release
 
 1. `git tag v<版本>` 并推送；

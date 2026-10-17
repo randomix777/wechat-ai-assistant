@@ -325,16 +325,39 @@ def generate_keypair() -> tuple[str, str]:
 
 def public_hex_from_private(private_key_b64: str) -> str:
     """从私钥里取出公钥十六进制（登记/自检用，不解私钥以外的信息）。"""
+    x, y, _d = _private_parts(private_key_b64)
+    return (x + y).hex()
+
+
+def _private_parts(private_key_b64: str) -> tuple[bytes, bytes, bytes]:
+    """拆 CNG 的 ECCPRIVATEBLOB：返回 (X, Y, d)。"""
     try:
         blob = base64.b64decode(str(private_key_b64 or "").strip())
     except Exception as exc:
         raise OSError(f"私钥不是合法的 base64：{exc}") from exc
-    if len(blob) < 8 + PUBKEY_BYTES:
+    if len(blob) < 8 + PUBKEY_BYTES + KEY_BYTES:
         raise OSError("私钥内容太短，不像是 CNG 的 ECCPRIVATEBLOB")
     magic = struct.unpack("<I", blob[:4])[0]
     if magic != _ECDSA_PRIVATE_MAGIC:
         raise OSError("私钥不是 CNG 的 P-256 私钥")
-    return blob[8:8 + PUBKEY_BYTES].hex()
+    offset = 8  # magic + cbKey
+    x = blob[offset:offset + KEY_BYTES]
+    y = blob[offset + KEY_BYTES:offset + 2 * KEY_BYTES]
+    d = blob[offset + 2 * KEY_BYTES:offset + 3 * KEY_BYTES]
+    return x, y, d
+
+
+def _b64url(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def jwk_from_private(private_key_b64: str) -> dict[str, str]:
+    """把 CNG 私钥转成 WebCrypto 认的 JWK（放进在线签名服务的 secret 时用）。
+
+    **返回值里有私钥**：由调用方负责别打印、别落盘、别进日志。
+    """
+    x, y, d = _private_parts(private_key_b64)
+    return {"kty": "EC", "crv": "P-256", "x": _b64url(x), "y": _b64url(y), "d": _b64url(d)}
 
 
 def sign_bytes(data: bytes, private_key_b64: str) -> bytes:
@@ -377,6 +400,13 @@ def signature_text(signature: bytes) -> str:
     return base64.b64encode(signature).decode("ascii")
 
 
+def signature_from_text(text: bytes | str) -> bytes | None:
+    """把签名的文本写法（base64/十六进制）读回 64 字节原始签名，读不出返回 None。"""
+    if isinstance(text, str):
+        text = text.encode("ascii", errors="ignore")
+    return _coerce_signature(text)
+
+
 __all__ = [
     "MANIFEST_NAME",
     "PUBKEY_HEX_LENGTH",
@@ -387,10 +417,12 @@ __all__ = [
     "canonical_manifest",
     "generate_keypair",
     "is_pinned",
+    "jwk_from_private",
     "parse_manifest",
     "pinned_key_hex",
     "public_hex_from_private",
     "sign_bytes",
+    "signature_from_text",
     "signature_text",
     "verify_manifest",
 ]
