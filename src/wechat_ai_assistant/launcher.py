@@ -10,9 +10,7 @@
 from __future__ import annotations
 
 import os
-import queue
 import sys
-import threading
 from pathlib import Path
 from typing import Any
 
@@ -137,16 +135,19 @@ def _show_update_splash(version: str) -> None:
 
 
 def _check_and_apply_update() -> bool:
-    """启动前检查新版；发现新版时下载、校验并交给替换脚本重启。
+    """启动前只应用**已经下好**的暂存更新；启动路径上不再联网。
 
     返回 True 表示更新脚本已接管当前进程，调用方应结束旧进程；
-    False 表示无更新或更新不可用，继续启动当前客户端。
+    False 表示没有暂存更新（或不可用），继续启动当前客户端。
+
+    「有没有新版」早就挪到界面起来之后，由
+    :func:`wechat_ai_assistant.updater.check_in_background` 在后台线程里查、下、
+    暂存了 —— 商户双击图标就该看见窗口，不该先等一个几十兆的下载。新版下好
+    会在顶栏留一句「下次打开自动更新」，下次启动由这里接手换版。
     """
     try:
         from wechat_ai_assistant.updater import (
             apply_pending_update,
-            check_for_update,
-            download_and_stage,
             is_frozen_app,
             pending_update,
         )
@@ -154,95 +155,12 @@ def _check_and_apply_update() -> bool:
             return False
         # 之前下载完但尚未来得及替换：先应用它，避免重复下载。
         pending = pending_update()
-        if pending is not None:
-            _show_update_splash(str(pending.get("version") or ""))
-            return apply_pending_update()
+        if pending is None:
+            return False
+        _show_update_splash(str(pending.get("version") or ""))
+        return apply_pending_update()
     except Exception:
         return False
-
-    # 下载在工作线程执行，启动提示窗口保持响应。检查/下载失败不影响旧版启动。
-    result_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
-
-    def work() -> None:
-        try:
-            info = check_for_update()
-            if info is None:
-                result_queue.put(("current", None))
-                return
-            staged = download_and_stage(info)
-            result_queue.put(("staged" if staged is not None else "failed", info))
-        except Exception:
-            result_queue.put(("failed", None))
-
-    try:
-        import tkinter as tk
-        from tkinter import ttk
-
-        root = tk.Tk()
-        root.title("微信AI智能助理")
-        root.resizable(False, False)
-        root.attributes("-topmost", True)
-        try:
-            from wechat_ai_assistant.ui_theme import apply_theme, set_window_icon
-            apply_theme(root)
-            set_window_icon(root)
-        except Exception:
-            pass
-        body = ttk.Frame(root, padding=(28, 22))
-        body.pack(fill="both", expand=True)
-        status = ttk.Label(body, text="正在检查客户端更新…", font=("Microsoft YaHei", 10))
-        status.pack(anchor="w")
-        progress = ttk.Progressbar(body, mode="indeterminate", length=310)
-        progress.pack(fill="x", pady=(14, 0))
-        progress.start(12)
-        root.update_idletasks()
-        _w, _h = root.winfo_reqwidth(), root.winfo_reqheight()
-        _x = (root.winfo_screenwidth() - _w) // 2
-        _y = (root.winfo_screenheight() - _h) // 2
-        root.geometry(f"{_w}x{_h}+{_x}+{_y}")
-        cancelled = {"value": False}
-
-        def close_window() -> None:
-            cancelled["value"] = True
-            root.destroy()
-
-        root.protocol("WM_DELETE_WINDOW", close_window)
-        threading.Thread(target=work, name="startup-update-check", daemon=True).start()
-        outcome: tuple[str, Any] | None = None
-
-        def poll() -> None:
-            nonlocal outcome
-            if cancelled["value"]:
-                return
-            try:
-                outcome = result_queue.get_nowait()
-            except queue.Empty:
-                root.after(100, poll)
-                return
-            kind, info = outcome
-            if kind == "staged":
-                status.configure(text=f"正在更新到 v{info.get('version', '新版本')}，完成后自动打开…")
-                progress.configure(mode="determinate", value=100)
-                root.after(500, root.destroy)
-            else:
-                root.destroy()
-
-        root.after(100, poll)
-        root.mainloop()
-        if cancelled["value"]:
-            return False
-        if outcome is not None and outcome[0] == "staged":
-            return apply_pending_update()
-        return False
-    except Exception:
-        # Tk 初始化失败时仍可自动更新；这一条路径只在真实发现新版时才下载。
-        try:
-            info = check_for_update()
-            if info is None or download_and_stage(info) is None:
-                return False
-            return apply_pending_update()
-        except Exception:
-            return False
 
 
 def _show_error_dialog(title: str, detail: str) -> None:
@@ -290,8 +208,9 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     bootstrap_paths()
-    # 打包客户端每次启动前检查上游。新版会先下载并校验，再由独立脚本
-    # 替换目录并自动重启；无新版/网络失败时继续用当前版本启动。
+    # 启动路径上只做本地的事：有下好的新版就先换掉再打开。查新版、下包挪到
+    # 界面起来之后的后台线程（见 merchant_ui.MerchantWindow._start_update_check），
+    # 所以这里的失败或"没有新版"都不影响打开软件。
     try:
         args = list(argv if argv is not None else sys.argv[1:])
         if "--check" not in args and _check_and_apply_update():

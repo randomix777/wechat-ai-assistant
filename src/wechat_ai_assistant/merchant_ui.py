@@ -812,16 +812,45 @@ class MerchantWindow:
         self._show_error_copy()
 
     def _on_update_staged(self, info: Any) -> None:
-        """新版已下载暂存：在顶栏版本号后面留一句话，下次打开自动更新。"""
+        """新版已下载暂存：在顶栏版本号后面留一句话，下次打开自动更新。
+
+        这个回调来自 updater 的后台线程 —— 碰 Tk 控件得回到主线程。
+        跨线程 configure 在部分 Tcl 版本上会直接把进程带崩，`after` 只是往
+        事件队列里塞一条消息，是这里最省事也最安全的做法。
+        """
         try:
             version = str((info or {}).get("version") or "")
         except Exception:
             version = ""
         if not version:
             return
+        root = getattr(self, "root", None)
+        if root is not None:
+            try:
+                root.after(0, lambda: self._show_update_note(version))
+                return
+            except Exception:
+                pass
+        self._show_update_note(version)
+
+    def _show_update_note(self, version: str) -> None:
+        """在主线程里改顶栏那句提示（拆出来是为了好测、也好被 after 调）。"""
         widget = self._widgets.get("update_note")
         if widget is not None and self._alive(widget):
             widget.configure(text=f"　新版 v{version} 已就绪，下次打开自动更新")
+
+    def _start_update_check(self) -> None:
+        """界面起来之后在后台查新版：查到就下载暂存，顶栏留一句提示。
+
+        以前这一步在启动路径上（双击 → 先查、先下几十兆 → 才开窗），商户看到的
+        是「点了没反应」。现在启动只做本地的事，更新在后台慢慢下，换版发生在
+        下次打开。开发模式（非打包）里 ``check_in_background`` 直接空转。
+        """
+        try:
+            from .updater import check_in_background
+            check_in_background(on_staged=self._on_update_staged)
+        except Exception:
+            pass
 
     @staticmethod
     def _data_origin_note(view: Any) -> str:
@@ -4524,6 +4553,11 @@ class MerchantWindow:
             self.root.destroy()
 
     def run(self) -> None:
+        # 先把窗口亮出来，再让后台去查新版：查/下都不占启动时间。
+        try:
+            self.root.after(2000, self._start_update_check)
+        except Exception:
+            pass
         self.root.mainloop()
 
 

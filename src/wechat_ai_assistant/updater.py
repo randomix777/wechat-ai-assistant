@@ -1,12 +1,15 @@
-"""检查更新与静默更新：启动前检查 GitHub Releases，有新版就替换并重启。
+"""检查更新与静默更新：后台查 GitHub Releases，有新版就悄悄换掉。
 
 ## 流程（全自动，不弹窗）
 
-1. 启动入口查 ``releases/latest``，有新版就下载；
-2. 压缩包 + `.sha256` 双文件校验，验不过直接扔掉，绝不安装；
-3. 解压到版本目录并写 ``pending.json``；
-4. 起一个分离的更新脚本，
-   等本进程退出后换目录、重启，旧版留备份，起不来自动回滚。
+1. 界面起来以后在后台线程查 ``releases/latest``，有新版就下载（启动路径上
+   不联网 —— 双击就该看见窗口，不能先等一个几十兆的下载）；
+2. 先验**签名清单**（``latest.json`` + ``latest.json.sig``，公钥钉在客户端里，
+   见 :mod:`wechat_ai_assistant.update_signature`），再比对包哈希，
+   两项都过不了直接扔掉，绝不安装；
+3. 解压到版本目录并写 ``pending.json``，界面顶栏留一句「下次打开自动更新」；
+4. 下次启动时起一个分离的更新脚本，等本进程退出后换目录、重启，
+   旧版留备份，起不来自动回滚。
 
 ## 为什么用分离脚本替换
 
@@ -18,7 +21,9 @@ Windows 下运行中的 exe 和 DLL 全被锁死，原地覆盖必失败。
 
 * 版本号就是 Git tag 去掉开头的 ``v``，和 :mod:`wechat_ai_assistant.version` 一致；
 * 安装包叫 ``微信AI智能助理-win64-<版本>.zip``，内容是整个 onedir 目录；
-* 同名加 ``.sha256`` 放十六进制哈希（单个文件哈希，不是 checksum 列表）。
+* 同名加 ``.sha256`` 放十六进制哈希（单个文件哈希，不是 checksum 列表）；
+* 每个版本还要放 ``latest.json`` + ``latest.json.sig``（``deploy/sign_release.py``
+  生成）—— 老客户端只认 ``.sha256``，所以过渡期两个都要传。
 
 这里任何一步失败都只记日志、不抛异常 —— 更新永远不能挡住启动。
 """
@@ -38,6 +43,8 @@ import urllib.request
 import zipfile
 from pathlib import Path
 from typing import Any, Callable, Mapping
+
+from . import update_signature as signing
 
 LOGGER = logging.getLogger(__name__)
 
@@ -115,9 +122,24 @@ def _http_get_bytes(url: str, timeout: float = HTTP_TIMEOUT) -> bytes:
         return response.read(1024 * 1024 * 1024 + 1)
 
 
+def _find_asset(assets: Any, name: str) -> str:
+    """按文件名在 release 资源里找下载地址。找不到返回空字符串。"""
+    for asset in assets or []:
+        if not isinstance(asset, Mapping):
+            continue
+        if str(asset.get("name") or "") == name:
+            return str(asset.get("browser_download_url") or "")
+    return ""
+
+
 def check_for_update(repo: str = DEFAULT_REPO, current: str = "") -> dict[str, Any] | None:
-    """查最新 release。有新版返回 ``{version, notes, zip_url, sha_url}``，
-    没有/查不到/任何异常都返回 None（调用方直接跳过）。"""
+    """查最新 release。有新版返回 ``{version, notes, zip_url, sha256, alt_urls}``，
+    没有/查不到/任何异常都返回 None（调用方直接跳过）。
+
+    有签名清单时**只认清单**：清单里写着这一版该装哪个包、哈希是多少，包地址
+    只是个下载入口。清单缺失或验不过，钉了公钥的客户端一律当作"没有新版" ——
+    宁可停在旧版，也不装一个来路不明的包。
+    """
     current = current or current_version()
     if not parse_version(current):
         return None
@@ -131,10 +153,85 @@ def check_for_update(repo: str = DEFAULT_REPO, current: str = "") -> dict[str, A
     version = str(release.get("tag_name") or release.get("name") or "")
     if not is_newer(version, current):
         return None
+    if version_is_blocked(version.lstrip("vV")):
+        LOGGER.info("版本 %s 之前换上去没起来，这次跳过（不重下）", version)
+        return None
+    return _release_info(release, version, current)
+
+
+def blocked_marker(version: str, base: Path | None = None) -> Path:
+    """换版失败留下的记号文件路径（`blocked-<版本>.txt`）。"""
+    return (base or app_dir()) / f"blocked-{str(version).lstrip('vV')}.txt"
+
+
+def version_is_blocked(version: str, base: Path | None = None) -> bool:
+    """这一版换上去过、但没起来：别再让商户一遍遍下它。
+
+    记号由换版脚本在回滚时留下（见 ``build_updater_script``），文件名跟这里要一致。
+    """
+    try:
+        return blocked_marker(version, base).is_file()
+    except Exception:
+        return False
+
+
+def _release_info(release: Mapping[str, Any], version: str, current: str) -> dict[str, Any] | None:
+    """从 release 里取这次更新该装什么：优先签名清单，退回老路。"""
     assets = release.get("assets") or []
+    manifest_url = _find_asset(assets, signing.MANIFEST_NAME)
+    if manifest_url:
+        info, rejected = _signed_release_info(release, assets, manifest_url, version, current)
+        if info is not None:
+            return info
+        if rejected or signing.is_pinned():
+            return None
+        LOGGER.warning("更新清单没验过，退回按哈希校验（客户端还没钉公钥）")
+    elif signing.is_pinned():
+        LOGGER.warning("release %s 里没有签名清单（%s），拒绝更新",
+                       version, signing.MANIFEST_NAME)
+        return None
+    return _legacy_release_info(assets, version)
+
+
+def _signed_release_info(release: Mapping[str, Any], assets: Any, manifest_url: str,
+                         version: str, current: str) -> tuple[dict[str, Any] | None, bool]:
+    """下载清单与签名、验签、核对内容。返回 ``(信息, 是否已否决)``。"""
+    signature_url = _find_asset(assets, signing.SIGNATURE_NAME) or manifest_url + ".sig"
+    try:
+        manifest = _http_get_bytes(manifest_url)
+        signature = _http_get_bytes(signature_url)
+    except Exception as exc:
+        LOGGER.warning("下载更新清单或签名失败：%s", exc)
+        return None, True
+    if not signing.verify_manifest(manifest, signature):
+        LOGGER.warning("更新清单签名校验失败，拒绝更新（可能是有人在改包）")
+        return None, True
+    parsed = signing.parse_manifest(manifest)
+    if parsed is None:
+        LOGGER.warning("更新清单内容不合法，拒绝更新")
+        return None, True
+    want = version.lstrip("vV")
+    if parsed["version"] != want:
+        LOGGER.warning("清单版本（%s）和 release 标签（%s）对不上，拒绝更新",
+                       parsed["version"], want)
+        return None, True
+    if not is_newer(parsed["version"], current):
+        return None, False
+    alt_urls = [url for url in (_find_asset(assets, f"{ASSET_PREFIX}{parsed['version']}.zip"),) if url]
+    return {
+        "version": parsed["version"],
+        "notes": parsed["notes"] or str(release.get("body") or ""),
+        "zip_url": parsed["zip_url"],
+        "sha256": parsed["sha256"],
+        "alt_urls": alt_urls,
+    }, False
+
+
+def _legacy_release_info(assets: Any, version: str) -> dict[str, Any] | None:
+    """老路：release 里的 zip + 同名 .sha256。只该给还没钉公钥的部署用。"""
     zip_url, sha_url = "", ""
     want_zip = f"{ASSET_PREFIX}{version.lstrip('vV')}.zip"
-    for asset in assets:
+    for asset in assets or []:
         if not isinstance(asset, Mapping):
             continue
         name = str(asset.get("name") or "")
@@ -145,7 +242,7 @@ def check_for_update(repo: str = DEFAULT_REPO, current: str = "") -> dict[str, A
             sha_url = url
     # 文件名对不上就退而求其次：第一个 win64 zip + 同名 sha256。
     if not zip_url:
-        for asset in assets:
+        for asset in assets or []:
             if not isinstance(asset, Mapping):
                 continue
             name = str(asset.get("name") or "")
@@ -157,8 +254,8 @@ def check_for_update(repo: str = DEFAULT_REPO, current: str = "") -> dict[str, A
     if not zip_url:
         LOGGER.debug("release %s 里没有安装包", version)
         return None
-    return {"version": version.lstrip("vV"), "notes": str(release.get("body") or ""),
-            "zip_url": zip_url, "sha_url": sha_url}
+    return {"version": version.lstrip("vV"), "notes": "",
+            "zip_url": zip_url, "sha256": "", "alt_urls": [], "sha_url": sha_url}
 
 
 def _sha256_file(path: Path) -> str:
@@ -171,24 +268,30 @@ def _sha256_file(path: Path) -> str:
 
 def download_and_stage(info: Mapping[str, Any], base: Path | None = None,
                        on_progress: Callable[[int, int], None] | None = None) -> Path | None:
-    """下载 → 验签 → 解压到版本目录。成功返回版本目录，失败返回 None。
+    """下载 → 校验 → 解压到版本目录。成功返回版本目录，失败返回 None。
 
-    验签不过/解压失败一律删干净，不留半截文件让下次启动误用。
+    校验不过/解压失败一律删干净，不留半截文件让下次启动误用。
     """
     base = base or app_dir()
     version = str(info.get("version") or "")
-    zip_url = str(info.get("zip_url") or "")
-    sha_url = str(info.get("sha_url") or "")
-    if not version or not zip_url or not parse_version(version):
+    urls = [str(info.get("zip_url") or "")]
+    urls.extend(str(url) for url in (info.get("alt_urls") or []))
+    urls = [url for url in urls if url]
+    if not version or not urls or not parse_version(version):
         return None
     staged = base / UPDATES_DIR_NAME / version
     tmp_dir = Path(tempfile.mkdtemp(prefix="pyw-dl-"))
     try:
         zip_path = tmp_dir / "app.zip"
-        try:
-            data = _http_get_bytes(zip_url, DOWNLOAD_TIMEOUT)
-        except Exception as exc:
-            LOGGER.debug("下载更新失败：%s", exc)
+        data = b""
+        for url in urls:
+            try:
+                data = _http_get_bytes(url, DOWNLOAD_TIMEOUT)
+                break
+            except Exception as exc:
+                LOGGER.debug("下载更新失败（%s）：%s", url, exc)
+        if not data:
+            LOGGER.warning("更新包哪个地址都没下下来，跳过这次更新")
             return None
         zip_path.write_bytes(data)
         if on_progress is not None:
@@ -196,14 +299,17 @@ def download_and_stage(info: Mapping[str, Any], base: Path | None = None,
                 on_progress(len(data), len(data))
             except Exception:
                 pass
-        # 验签：有 sha 文件就必须对上；没有 sha 文件就拒绝安装。
-        # 无签名的包不装 —— 省这一步等于把商户电脑交给任意下载。
-        expected = ""
-        if sha_url:
-            try:
-                expected = _http_get_bytes(sha_url).decode("utf-8", errors="replace").split()[0].strip().lower()
-            except Exception as exc:
-                LOGGER.debug("下载校验文件失败：%s", exc)
+        # 校验：优先用签名清单里写的哈希（清单本身已经验过签名），其次才去
+        # 下载 .sha256。两个都没有就拒绝安装 —— 没有哈希的包不装，省这一步
+        # 等于把商户电脑交给任意下载。
+        expected = str(info.get("sha256") or "").strip().lower()
+        if not expected:
+            sha_url = str(info.get("sha_url") or "")
+            if sha_url:
+                try:
+                    expected = _http_get_bytes(sha_url).decode("utf-8", errors="replace").split()[0].strip().lower()
+                except Exception as exc:
+                    LOGGER.debug("下载校验文件失败：%s", exc)
         if not expected or _sha256_file(zip_path) != expected:
             LOGGER.warning("更新包校验失败，已丢弃")
             return None
@@ -279,68 +385,160 @@ def pending_update(base: Path | None = None) -> dict[str, Any] | None:
 
 
 def build_updater_script(base: Path, info: Mapping[str, Any], exe_name: str,
-                         self_pid: int) -> Path:
+                         self_pid: int, settle_seconds: int = 15) -> Path:
     """生成更新脚本并返回路径。脚本自己住在系统临时目录（搬目录时不受影响）。
 
     流程：等本进程退出 → 把新版目录挪到外面 → 旧目录整个改名备份 →
-    新版目录搬进来 → 起新版（15 秒还活着就算成，删备份）→
+    新版目录搬进来 → 起新版（等 `settle_seconds` 秒还活着就算成，删备份）→
     起不来就删了换回旧版再起。最后自删。
 
     用 .bat 而不用再打一个 exe：少一个构建产物，逻辑全摆在明面上。
+    `settle_seconds` 只给测试调小用（真机上 15 秒是给慢机器留的余量）。
     """
     staged = base / UPDATES_DIR_NAME / str(info.get("dir"))
     backup = base.parent / (base.name + BACKUP_PREFIX + str(info.get("version")))
     sibling = base.parent / (base.name + f".staged-{info.get('version')}")
     portable_data = base / "data"
     script = Path(tempfile.gettempdir()) / f"pyw-apply-{info.get('version')}.bat"
+    version = str(info.get("version"))
+    # 换版一旦落定（不管成没成），都必须把 pending.json 收掉：脚本在收尾时会
+    # **把软件重新启动一次**，那一次启动又会读到 pending 再生成一个脚本 —— 演练里
+    # 实测会变成"启动→换版失败→再启动"的死循环（日志里连着刷了二十次）。
+    # 备份目录里那份也要删：换到一半时旧目录已经被改名成备份，pending 跟着它走。
+    forget_pending = [
+        f'del "{base}\\{PENDING_NAME}" 2>nul',
+        f'del "{backup}\\{PENDING_NAME}" 2>nul',
+    ]
+    # 新版换上去又没起来的证据：在**两个**目录里都留一份记号（回滚时活下来的是备份
+    # 那个目录，它随后会被改名回 base），后台查更新看到记号就不再下这一版 —— 否则
+    # 每启动一次都要重下 70MB、再失败一次。
+    mark_blocked = [
+        f'>>"{blocked_marker(version, base)}" echo 这一版换上去没起来，先跳过',
+        f'>>"{blocked_marker(version, backup)}" echo 这一版换上去没起来，先跳过',
+    ]
+
+    def sleep(seconds: int) -> str:
+        """等一会儿。用 ping 不用 timeout.exe：timeout 在标准输入被重定向时直接退出
+        （"Input redirection is not supported, exiting the process immediately."），
+        而脚本是 GUI 进程用 CREATE_NO_WINDOW 拉起来的，根本没有控制台给它 —— 真机上
+        那两处等待会一起消失。回环的第一个回包立刻就到，所以 -n N 大约等 N-1 秒。"""
+        return f'"%SYS%\\ping.exe" -n {seconds + 1} 127.0.0.1 >nul'
+
+    log = Path(tempfile.gettempdir()) / f"pyw-apply-{info.get('version')}.log"
+
+    def note(text: str) -> str:
+        """往日志里记一行（`%TEMP%\\pyw-apply-<版本>.log`），商户机器上出问题能查。
+
+        只插在"上一条 errorlevel 已经被 if 消化掉"的位置；失败分支的日志放分支第一行
+        （那里后面只剩 `if exist` 判断，不会再读 errorlevel）。文案里别用括号、管道、
+        重定向符号 —— 它们会改掉命令行的意思。
+        """
+        return f'>>"{log}" echo [%date% %time%] {text}'
+
     lines = [
         "@echo off",
         "chcp 65001 >nul",
+        # 外部命令一律走绝对路径：开发机上 PATH 里的 find/timeout 可能是 MSYS 的
+        # 同名工具（find 会拿着参数跑去全盘搜文件名，timeout 的语法也不一样）。
+        'set "SYS=%SystemRoot%\\System32"',
+        "rem 换版过程写进日志：商户把 %TEMP% 下的 pyw-apply-*.log 发回来就能查",
+        note(f"开始换版：{info.get('version')}，等旧进程 {self_pid} 退出"),
         f"rem 等待旧进程 {self_pid} 退出",
         ":wait",
-        f'tasklist /FI "PID eq {self_pid}" 2>nul | find "{self_pid}" >nul',
-        "if %errorlevel%==0 (timeout /t 1 /nobreak >nul & goto wait)",
+        f'"%SYS%\\tasklist.exe" /FI "PID eq {self_pid}" /NH 2>nul'
+        f' | "%SYS%\\find.exe" "{self_pid}" >nul',
+        f'if %errorlevel%==0 ({sleep(1)} & goto wait)',
+        note("旧进程已退出，开始搬目录"),
         f'if exist "{sibling}" rmdir /s /q "{sibling}"',
         f'move "{staged}" "{sibling}"',
-        "if errorlevel 1 goto start_old",
+        "if errorlevel 1 goto stage_failed",
         # Never discard an existing backup: an interrupted prior update may
         # still have the only preserved copy of a portable user's data.
         f'if exist "{backup}" goto restore_stage',
-        f'move "{base}" "{backup}"',
-        "if errorlevel 1 goto restore_stage",
+        # 旧目录偶尔还被人占着（杀软刚扫过、上一个进程的句柄还没彻底放）。试三次再
+        # 认输：一次偶发占用不该让商户这次更新白等一个版本周期。
+        "set /a swap_try=0",
+        ":try_swap",
+        f'move "{base}" "{backup}" 2>nul',
+        "if not errorlevel 1 goto swapped",
+        "set /a swap_try+=1",
+        "if %swap_try% GEQ 3 goto restore_stage",
+        note("旧目录还被占着，等两秒再试一次"),
+        sleep(2),
+        "goto try_swap",
+        ":swapped",
         f'move "{sibling}" "{base}"',
         "if errorlevel 1 goto rollback",
-        # Move portable data from the old-version backup into the new app.
-        # On failure, rollback returns it to the backup before deleting the new app.
-        f'if exist "{backup}\\data" move "{backup}\\data" "{portable_data}"',
-        f'if exist "{backup}\\data" goto rollback',
+        # Portable data from the old version joins the new app. 新版包里自带一个
+        # 空的 data 目录，所以这里不能用 move：move 到已存在的目录会在它里面再嵌一层
+        # （data\data\…），用户就会以为自己的数据没了。xcopy 倒的是源目录的内容；
+        # 它的 errorlevel 1 只是"没东西可拷"，2 及以上才算真失败。
+        f'if exist "{backup}\\data" xcopy /e /i /q /y /h "{backup}\\data" "{portable_data}" >nul',
+        "if errorlevel 2 goto rollback",
+        f'if exist "{backup}\\data" rmdir /s /q "{backup}\\data"',
+        note("新版已就位，便携数据已并过去"),
+        f'if not exist "{base}\\{exe_name}" goto rollback',
         f'start "" "{base}\\{exe_name}"',
-        "timeout /t 15 /nobreak >nul",
-        f'tasklist /FI "IMAGENAME eq {exe_name}" 2>nul | find "{exe_name}" >nul',
-        "if %errorlevel%==0 goto success",
+        note(f"起了新版，等 {settle_seconds} 秒后看它活没活"),
+        sleep(settle_seconds),
+        # "新版起来了没有"：拿它自己的映像名问 tasklist —— 老版进程这时候已经退了（脚本
+        # 就是它起的），所以同名进程还在，就是新版起来了。
+        # 不用「能不能往主程序里写一个字节」判断：实测那份映像被搬过目录之后追加写会
+        # 成功（它不再算"运行中的映像"），于是新版明明活着却被判成没起来，脚本会走进
+        # 回滚分支、还想 rmdir 正在运行的新目录，最后把备份嵌进新版里面。
+        # tasklist 的 IMAGENAME 过滤在 chcp 65001 下对中文名是对得上的；find 走绝对
+        # 路径，避开开发机 PATH 里那个 MSYS 的同名工具。
+        f'"%SYS%\\tasklist.exe" /FI "IMAGENAME eq {exe_name}" /NH 2>nul'
+        f' | "%SYS%\\find.exe" "{exe_name}" >nul',
+        "if not errorlevel 1 goto success",
+        note("新版没起来：回滚旧版"),
         ":: 新版没起来，回滚旧版",
+        *forget_pending,
+        *mark_blocked,
         f'if exist "{portable_data}" if not exist "{backup}\\data" move "{portable_data}" "{backup}\\data"',
         f'rmdir /s /q "{base}"',
         f'move "{backup}" "{base}"',
         f'start "" "{base}\\{exe_name}"',
         "goto finish",
         ":rollback",
+        note("换版中途失败：回滚旧版"),
+        *forget_pending,
         f'if exist "{portable_data}" if not exist "{backup}\\data" move "{portable_data}" "{backup}\\data"',
         f'if exist "{base}" rmdir /s /q "{base}"',
+        # 新版目录删不掉（还有进程占着、杀软锁着）时绝不能往下搬：move 到已存在的目录
+        # 会把整个备份塞进新版里面，用户就同时丢了"能跑的旧版"和"能回滚的备份"。
+        # 这时候退而求其次：直接起备份里的旧版，剩下的留给下次启动处理。
+        f'if exist "{base}" goto start_backup',
         f'if exist "{backup}" move "{backup}" "{base}"',
         f'if exist "{base}\\{exe_name}" start "" "{base}\\{exe_name}"',
         "goto finish",
+        ":start_backup",
+        note("新版目录删不掉：先把备份里的旧版起起来"),
+        *forget_pending,
+        f'if exist "{backup}\\{exe_name}" start "" "{backup}\\{exe_name}"',
+        "goto finish",
+        ":stage_failed",
+        note("换版失败：暂存目录搬不动，可能被杀软占着"),
+        *forget_pending,
+        "goto start_old",
         ":restore_stage",
+        note("换版失败：旧目录还被占着，这次不换了，下次启动再说"),
+        *forget_pending,
         f'if exist "{sibling}" move "{sibling}" "{staged}"',
         ":start_old",
         f'if exist "{base}\\{exe_name}" start "" "{base}\\{exe_name}"',
         "goto finish",
         ":success",
+        note("新版活了：删掉旧版备份，换版完成"),
+        *forget_pending,
         f'if exist "{backup}" rmdir /s /q "{backup}"',
         ":finish",
+        note("脚本收尾"),
         'del "%~f0"',
     ]
-    script.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8")
+    # newline="" 别让 Python 再做一次换行翻译：否则显式的 "\r\n" 会变成 "\r\r\n"，
+    # cmd 会把每两行之间那条空的回车当成一个空命令行（能跑，但日志和排错都难看）。
+    script.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8", newline="")
     return script
 
 
@@ -362,8 +560,12 @@ def apply_pending_update(base: Path | None = None) -> bool:
         return False
     try:
         script = build_updater_script(base, info, exe.name, os.getpid())
+        # cwd 千万别设成 base：脚本第一步就是把 base 整个改名成"备份"，而 Windows
+        # 不允许重命名"某个进程的当前目录"—— 真机上就表现成"旧目录还被占着"，
+        # 于是每次启动都换不成（演练里实测：日志里连着二十次 swap 失败）。
+        # 脚本里全是绝对路径，从 %TEMP% 跑完全没问题。
         subprocess.Popen(
-            ["cmd", "/c", str(script)], cwd=str(base),
+            ["cmd", "/c", str(script)], cwd=str(script.parent),
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             close_fds=True)
     except Exception as exc:
@@ -383,7 +585,9 @@ def check_in_background(on_staged: Callable[[Mapping[str, Any]], None] | None = 
         try:
             if not is_frozen_app():
                 return
-            info = check_for_update(repo)
+            # 必须带上本机版本：不传就是拿空串比，任何 release 都"更新"，界面一启动
+            # 就去下自己已经在跑的这版，白耗流量还多一次换版。
+            info = check_for_update(repo, current=current_version())
             if info is None:
                 return
             staged = download_and_stage(info)
