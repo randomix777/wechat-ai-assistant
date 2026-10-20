@@ -45,8 +45,11 @@ sys.path.insert(0, str(ROOT / "src"))
 from wechat_ai_assistant.summary import Summarizer  # noqa: E402
 
 
-def _http_error(code: int, message: str, previous: list | None = None) -> urllib.error.HTTPError:
+def _http_error(code: int, message: str, previous: list | None = None,
+                error_code: str | None = None) -> urllib.error.HTTPError:
     payload: dict = {"error": {"message": message}}
+    if error_code is not None:
+        payload["error"]["code"] = error_code
     if previous is not None:
         payload["error"]["metadata"] = {"previous_errors": previous}
     return urllib.error.HTTPError(
@@ -144,10 +147,10 @@ class BalanceRetryTests(unittest.TestCase):
 class ErrorMessageTests(unittest.TestCase):
     """错误文案要能照着做。"""
 
-    def _fail_with(self, code, message, previous=None):
+    def _fail_with(self, code, message, previous=None, error_code=None):
         summarizer = Summarizer("https://example.invalid/v1", "k", "m")
         with mock.patch("urllib.request.urlopen",
-                        side_effect=_http_error(code, message, previous)):
+                        side_effect=_http_error(code, message, previous, error_code)):
             return summarizer.summarize(MESSAGES)["error"]
 
     def test_the_bare_http_code_is_never_the_whole_message(self):
@@ -171,6 +174,27 @@ class ErrorMessageTests(unittest.TestCase):
     def test_a_bad_key_says_so(self):
         for code in (401, 403):
             self.assertIn("密钥", self._fail_with(code, "unauthorized"))
+
+    def test_not_approved_is_not_dressed_up_as_a_broken_key(self):
+        """开通闸门跟密钥没关系。
+
+        密钥是好的，是这个账号还没被批准用这个应用。商户看见"密钥无效"会去
+        折腾一个没坏的东西，而真正该做的事（联系 JYI 开通）没人告诉他。
+        """
+        error = self._fail_with(403, "This account has not been approved for this application.",
+                                error_code="access_not_approved")
+        self.assertIn("开通", error)
+        self.assertNotIn("密钥", error)
+
+    def test_not_approved_says_the_messages_are_safe(self):
+        error = self._fail_with(403, "not approved", error_code="access_not_approved")
+        self.assertIn("没少", error)
+
+    def test_an_approval_service_outage_is_not_blamed_on_the_merchant(self):
+        error = self._fail_with(503, "approval service is not configured",
+                                error_code="approval_check_unavailable")
+        self.assertIn("稍后", error)
+        self.assertNotIn("密钥", error)
 
     def test_other_errors_carry_the_upstream_words(self):
         error = self._fail_with(500, "upstream exploded")

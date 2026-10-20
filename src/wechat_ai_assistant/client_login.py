@@ -80,6 +80,10 @@ _ERROR_LABELS = {
     "unauthenticated": "登录已过期，请重新登录",
     "forbidden": "当前设备已被停用，请联系客服",
     "device_revoked": "当前设备已被停用，请联系客服",
+    # JYI 网关的开通闸门。**不是**"密钥无效"：密钥没问题，是这个账号还没被批准
+    # 用这个应用。说成密钥失效会把商户引到错误的方向上去折腾。
+    "access_not_approved": "这个账号还没有开通智能整理，请联系 JYI 开通。已经读到的消息一条都没少。",
+    "approval_check_unavailable": "暂时无法确认开通状态，请稍后重试或联系 JYI。",
     "outcome_unknown": STATUS_UNKNOWN,
     "invalid_output": "解析结果异常，请重试",
     "backend_unavailable": STATUS_NETWORK_DOWN,

@@ -27,7 +27,7 @@
 
 * **原话**。摘要里写「客户说：那个上次买的」，而不是「客户要买上次那件商品」。
   商户可能自己就知道那是什么。
-* **说不清的地方**。摘要里直接标「这句没说清」���而不是猜一个填上。
+* **说不清的地方**。摘要里直接标「这句没说清」，而不是猜一个填上。
 * **时间与数量**。这两样最容易在整理时丢掉，而它们恰恰决定要不要送货、送多少。
 """
 from __future__ import annotations
@@ -288,10 +288,12 @@ class Summarizer:
         """
         detail = ""
         affordable = None
+        code = ""
         try:
             payload = json.loads(exc.read().decode("utf-8"))
             error = payload.get("error") or {}
             detail = str(error.get("message") or "")
+            code = str(error.get("code") or "")
             # 上游会说「You requested up to 2000 tokens, but can only afford 473」。
             match = re.search(r"can only afford\s+(\d+)", detail)
             if match:
@@ -319,6 +321,15 @@ class Summarizer:
         if exc.code == 429:
             return {"summary": "", "cost": None, "message_count": count,
                     "error": "模型这边临时限流，等一会儿再点一次就好。"}
+        # 开通闸门：**不是**密钥问题。密钥有效，是这个账号还没被批准用这个应用。
+        # 说成"密钥无效"会把商户引去折腾一个没坏的密钥，而真正该做的事
+        # （联系 JYI 开通）没人告诉他。
+        if code == "access_not_approved":
+            return {"summary": "", "cost": None, "message_count": count,
+                    "error": "这个账号还没有开通智能整理，请联系 JYI 开通。已经读到的消息一条都没少。"}
+        if code == "approval_check_unavailable":
+            return {"summary": "", "cost": None, "message_count": count,
+                    "error": "暂时无法确认开通状态，请稍后重试或联系 JYI。"}
         if exc.code in (401, 403):
             return {"summary": "", "cost": None, "message_count": count,
                     "error": "模型密钥无效或已失效，需要重新配置。"}
