@@ -72,7 +72,7 @@ _ERROR_LABELS = {
     "model_unavailable": "所选模型暂不可用，已为您保留",
     "model_not_allowed": "所选模型不可用，请重新选择",
     "platform_budget_exhausted": "服务暂不可用，已为您保留",
-    "pricing_changed": "分析价格有变化，请重新确认",
+    "pricing_changed": "分析价格或条款有变化，请重新确认",
     "pricing_version_required": "提交前需要先确认这次分析的费用",
     "concurrency_limit": "当前解析任务较多，请稍后再试",
     "model_concurrency_limit": "当前解析任务较多，请稍后再试",
