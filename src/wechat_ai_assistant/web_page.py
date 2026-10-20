@@ -18,7 +18,7 @@ PAGE = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>微信AI智能助理 · 开发调试</title>
+<title>微信AI智能助理 __VERSION__ · 开发调试</title>
 <style>
   :root {
     --ink: #1b2430; --muted: #667486; --line: #dfe4ea; --bg: #f5f7f9;
@@ -36,6 +36,7 @@ PAGE = r"""<!DOCTYPE html>
   header nav a:hover { color: var(--accent); }
   .badge { font-size: 12px; color: var(--muted); border: 1px solid var(--line);
            border-radius: 999px; padding: 2px 10px; }
+  .badge[data-kind="error"] { color: var(--bad); border-color: #f1b7b4; background: #fff5f4; }
   main { max-width: 1080px; margin: 0 auto; padding: 20px; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px;
           padding: 16px; margin-bottom: 16px; }
@@ -74,7 +75,7 @@ PAGE = r"""<!DOCTYPE html>
   <span class="badge" id="step">—</span>
   <span class="badge" id="busy" hidden></span>
   <span style="margin-left:auto"></span>
-  <span class="badge" id="conn">连接中…</span>
+  <span class="badge" id="conn" data-kind="pending" role="status" aria-live="polite" hidden></span>
 </header>
 
 <main>
@@ -209,11 +210,12 @@ async function post(path, body) {
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify(body || {}),
     });
+    setConnectionStatus(true);
     const data = await r.json();
     if (!r.ok) { banner(data.error || ("请求失败：" + r.status), true); return data; }
     return data;
   } catch (e) {
-    banner("连不上服务：" + e.message, true);
+    setConnectionStatus(false);
     return null;
   }
 }
@@ -221,10 +223,21 @@ async function post(path, body) {
 async function load(path) {
   try {
     const r = await fetch(path);
+    setConnectionStatus(true);
     return await r.json();
   } catch (e) {
-    banner("连不上服务：" + e.message, true);
+    setConnectionStatus(false);
     return null;
+  }
+}
+
+// 服务正常时不占用顶栏；只有断连时显示一条提示，成功轮询后自动收起。
+function setConnectionStatus(connected) {
+  const status = $("conn");
+  status.hidden = !!connected;
+  if (!connected) {
+    status.dataset.kind = "error";
+    status.textContent = "连接中断，正在重试…";
   }
 }
 
@@ -234,7 +247,7 @@ function banner(text, bad) {
 }
 
 function render(data) {
-  $("conn").textContent = "已连接";
+  setConnectionStatus(true);
   $("step").textContent = data.step || "—";
   const busy = $("busy");
   busy.hidden = !data.busy;

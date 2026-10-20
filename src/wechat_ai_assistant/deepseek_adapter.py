@@ -207,7 +207,7 @@ class DeepSeekAdapter:
         """摘要任务执行：提示词复用 :mod:`wechat_ai_assistant.summary` 那一份（单源），
         输出是纯文本简报（不是订单 JSON），用摘要自己的校验。"""
         from .summary import SUMMARY_SYSTEM_PROMPT
-        from .roles import ROLE_ORDER, analysis_instruction, order_report_merge_instruction
+        from .roles import analysis_instruction, role_report_merge_instruction
         from business_agent.contracts.protocols import PromptPackage
 
         if cancel_check is not None and cancel_check():
@@ -223,8 +223,8 @@ class DeepSeekAdapter:
         output_budget = (configured_output_limit if configured_output_limit > 0
                          else SUMMARY_OUTPUT_TOKEN_FALLBACK)
         raw_messages = payload.get("messages", [])
-        if role_id == ROLE_ORDER and analysis_stage == "reduce":
-            prompt_system = order_report_merge_instruction()
+        if role_id and analysis_stage == "reduce":
+            prompt_system = role_report_merge_instruction(role_id)
             prompt_payload = {
                 "reports": [str(item.get("content") or "")
                             for item in raw_messages if isinstance(item, Mapping)]

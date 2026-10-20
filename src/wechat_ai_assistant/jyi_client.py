@@ -112,6 +112,19 @@ class JYIClient(MerchantClient):
             "device_token": self.session.refresh_token,
         }, authenticated=False)
 
+    def tool_access_token(self) -> str:
+        """Exchange this connection's device credential for a short Tool Center token."""
+        if self.session is None or not self.session.device_id or not self.session.refresh_token:
+            raise GatewayError("unauthenticated", "请先登录 JYI 账号")
+        result = self.auth_client._request("POST", "/oauth/tools-access", {
+            "connection_id": self.session.device_id,
+            "device_token": self.session.refresh_token,
+        }, authenticated=False)
+        token = str(result.get("tool_access_token") or "").strip()
+        if not token.startswith("jyi_tool_"):
+            raise GatewayError("tool_access_invalid", "JYI 未返回有效的工具下载凭据")
+        return token
+
     def refresh(self) -> dict[str, Any]:
         # JYI keys do not expire like product access tokens. Never rotate a key
         # implicitly: it invalidates the previous credential.

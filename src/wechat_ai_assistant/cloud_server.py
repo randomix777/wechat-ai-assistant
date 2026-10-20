@@ -14,7 +14,6 @@ from typing import Any, Mapping
 from urllib.parse import parse_qs, unquote, urlparse
 from uuid import uuid4
 
-from .agent import AgentCommand
 from .console import CONSOLE_HTML
 from .orders import OpenAICompatibleParser, OrderStore
 
@@ -169,30 +168,6 @@ class CloudStore:
             }
             for row in rows
         ]
-
-    def enqueue(self, agent_id: str, command: AgentCommand) -> bool:
-        now = time.time()
-        with self._lock, self._connection:
-            cursor = self._connection.execute(
-                """
-                INSERT OR IGNORE INTO commands(
-                    command_id, agent_id, action, target, payload,
-                    max_attempts, retryable, status, result, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', NULL, ?, ?)
-                """,
-                (
-                    command.command_id,
-                    agent_id,
-                    command.action,
-                    command.target,
-                    json.dumps(dict(command.payload), ensure_ascii=False, default=str),
-                    command.max_attempts,
-                    int(command.retryable),
-                    now,
-                    now,
-                ),
-            )
-            return cursor.rowcount == 1
 
     def list_commands(self, agent_id: str, limit: int = 20) -> list[dict[str, Any]]:
         limit = max(1, min(limit, 100))
@@ -392,58 +367,15 @@ class CloudRequestHandler(BaseHTTPRequestHandler):
         if not self._authorized():
             self._send_json(401, {"error": "unauthorized"})
             return
-        agent_id = self._agent_id()
-        if not agent_id:
-            self._send_json(400, {"error": "X-Agent-Id is required"})
-            return
-        if parsed.path == "/api/v1/agent/commands":
-            query = parse_qs(parsed.query)
-            try:
-                limit = int(query.get("limit", ["20"])[0])
-            except (TypeError, ValueError):
-                self._send_json(400, {"error": "limit must be an integer"})
-                return
-            self._send_json(200, {"commands": self.store.list_commands(agent_id, limit)})
-            return
         self._send_json(404, {"error": "not found"})
-
-    def _enqueue_console_command(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        agent_id = str(payload.get("agent_id", "")).strip()
-        action = str(payload.get("action", "")).strip()
-        target = str(payload.get("target", "")).strip()
-        command_payload = payload.get("payload", {})
-        if not agent_id or not action or not target:
-            raise ValueError("agent_id, action and target are required")
-        if not isinstance(command_payload, Mapping):
-            raise ValueError("payload must be an object")
-        if action not in {"send_text", "send_messages", "noop"}:
-            raise ValueError("unsupported console action")
-        if action == "send_text" and not str(command_payload.get("text", "")).strip():
-            raise ValueError("send_text requires text")
-        if action == "send_messages" and (
-            not isinstance(command_payload.get("messages"), list) or not command_payload["messages"]
-        ):
-            raise ValueError("send_messages requires a non-empty list")
-        try:
-            max_attempts = int(payload.get("max_attempts", 3))
-        except (TypeError, ValueError) as exc:
-            raise ValueError("max_attempts must be an integer") from exc
-        if not 1 <= max_attempts <= 10:
-            raise ValueError("max_attempts must be between 1 and 10")
-        command_id = str(payload.get("command_id", "")).strip() or f"console-{uuid4().hex}"
-        command = AgentCommand(
-            command_id=command_id,
-            action=action,
-            target=target,
-            payload=command_payload,
-            max_attempts=max_attempts,
-            retryable=bool(payload.get("retryable", False)),
-        )
-        created = self.store.enqueue(agent_id, command)
-        return {"command_id": command.command_id, "agent_id": agent_id, "created": created}
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        # agent 接口必须验 token：加回被删掉的命令路由时一并丢过这道闸门，
+        # 少了它，任何 agent 拿别人的 token 也能上报（实测 200）。
+        if parsed.path.startswith("/api/v1/agent/") and not self._authorized():
+            self._send_json(401, {"error": "unauthorized"})
+            return
         if parsed.path == "/api/v1/agent/business-events":
             identity=self._device_merchant()
             if not identity:self._send_json(401,{"error":"bound device token required"});return
@@ -505,24 +437,6 @@ class CloudRequestHandler(BaseHTTPRequestHandler):
             except (ValueError,KeyError,PermissionError,sqlite3.IntegrityError) as exc:self._send_json(400,{"error":str(exc)})
             except Exception:self._send_json(500,{"error":"internal server error"})
             return
-        if parsed.path == "/api/v1/console/commands":
-            if not self._console_authorized():
-                self._send_json(401, {"error": "unauthorized"})
-                return
-            try:
-                self._send_json(200, self._enqueue_console_command(self._read_json()))
-            except (ValueError, json.JSONDecodeError) as exc:
-                self._send_json(400, {"error": str(exc)})
-            except Exception:
-                self._send_json(500, {"error": "internal server error"})
-            return
-        if not self._authorized():
-            self._send_json(401, {"error": "unauthorized"})
-            return
-        agent_id = self._agent_id()
-        if not agent_id:
-            self._send_json(400, {"error": "X-Agent-Id is required"})
-            return
         if parsed.path == "/api/v1/agent/business-events":
             identity=self._merchant()
             if not identity or identity.get("role")!="device":self._send_json(401,{"error":"bound device token required"});return
@@ -532,6 +446,9 @@ class CloudRequestHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         try:
             payload = self._read_json()
+            agent_id = self._agent_id()
+            if not agent_id:
+                raise ValueError("X-Agent-Id is required")
             if parsed.path == "/api/v1/agent/heartbeat":
                 health = payload.get("health", {})
                 if not isinstance(health, Mapping):
@@ -545,14 +462,6 @@ class CloudRequestHandler(BaseHTTPRequestHandler):
                     raise ValueError("events must be a list")
                 self._send_json(200, {"inserted": self.store.ingest_events(agent_id, events)})
                 return
-            if parsed.path.startswith("/api/v1/agent/commands/") and parsed.path.endswith("/ack"):
-                command_id = unquote(parsed.path.split("/")[-2])
-                result = payload.get("result", {})
-                if not isinstance(result, Mapping):
-                    raise ValueError("result must be an object")
-                self._send_json(200, {"updated": self.store.acknowledge(agent_id, command_id, result)})
-                return
-            self._send_json(404, {"error": "not found"})
         except (ValueError, json.JSONDecodeError) as exc:
             self._send_json(400, {"error": str(exc)})
         except Exception:

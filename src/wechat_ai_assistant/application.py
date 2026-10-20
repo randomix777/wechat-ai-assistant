@@ -1,8 +1,8 @@
 """商户应用的编排层：界面只调用这里。
 
-把「应用」和「界面」分开，是因为 Tkinter 窗口在自动化测试里既跑不起来也不该
-跑。:class:`MerchantApplication` 承载全部业务流转，:mod:`wechat_ai_assistant.merchant_ui`
-只负责把状态画出来。
+把「应用」和「界面」分开，是因为界面在自动化测试里既跑不起来也不该跑。
+:class:`MerchantApplication` 承载全部业务流转，界面（``web_server`` 的接口 +
+``web_wizard_page`` 的页面）只负责把状态画出来。
 
 **这保证了一件事**：界面上点「开始智能整理」，走的就是测试里验证过的那条
 真实路径，不是另一条只在测试里存在的捷径。
@@ -18,7 +18,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from .agent import AgentStore
 from .conversations import (
     Conversation,
     ConversationKind,
@@ -38,18 +37,9 @@ from .history_read import (
     TimeWindow,
 )
 from .merging import MergeSettings, MessageMerger
-from .receipts import ReceiptOutbox
 from .reliability import UiOperationQueue
 from .runmode import AutoOrderSettings, MerchantSettings, RunMode, SettingsStore
 from .service import ApplyOutcome, OrderPipeline
-from .wechat_send import (
-    SafeReceiptSender,
-    SendCheck,
-    SendHeld,
-    SendVerdict,
-    TargetInspector,
-    real_sending_available,
-)
 from .wechat_state import (
     RealWeChatLauncher,
     RealWeChatProbe,
@@ -104,6 +94,12 @@ class AppEvents:
     #: 注意名字不能叫 on_login：界面上 _on_login 是"发起登录"按钮，
     #: 事件泵按 _on_<kind> 找处理器，重名会点成死循环。
     on_logged_in: Callable[[], None] | None = None
+    #: AI 报告的增量文本。Web 界面据此在生成过程中更新实时预览。
+    on_analysis_stream: Callable[[str], None] | None = None
+    #: 一句**不打断人**的告知（显示在顶部横幅，可以随时被下一条覆盖）。
+    #: 用来讲清"软件此刻在动什么"，比如首次读取要扫描微信数据库并提取密钥。
+    #: 传空串表示撤掉。
+    on_notice: Callable[[str], None] | None = None
 
 
 class MerchantApplication:
@@ -123,11 +119,9 @@ class MerchantApplication:
         sender_source: str = "",
         gateway_url: str = "",
         client_factory: Callable[[Any], Any] | None = None,
-        sender: Callable[[str, str], Any] | None = None,
         events: AppEvents | None = None,
         simulated: bool = False,
         merge_settings: Mapping[str, Any] | None = None,
-        target_inspector: TargetInspector | None = None,
     ):
         self.data_dir = data_dir
         self.orders = orders
@@ -145,15 +139,10 @@ class MerchantApplication:
         self.settings: MerchantSettings = self.settings_store.load()
         self.auto: AutoOrderSettings = self.settings.auto
 
-        self.agent_store = AgentStore(str(data_dir / "agent.db"))
-        self.outbox = ReceiptOutbox(self.agent_store, sender=sender)
         self.cursor = HistoryCursor(str(data_dir / "history.db"))
         self.merger = MessageMerger(
             str(data_dir / "merge.db"), MergeSettings(**merge_settings) if merge_settings else None
         )
-        #: 发送前的草稿守卫。真实发送默认关闭，见 :mod:`wechat_ai_assistant.wechat_send`。
-        self.target_inspector: TargetInspector | None = None
-        self.send_guard: SafeReceiptSender | None = None
 
         self.probe = probe or RealWeChatProbe()
         self.launcher = launcher or RealWeChatLauncher()
@@ -172,21 +161,19 @@ class MerchantApplication:
         self.wxid_aliases: dict = self.load_aliases()
         self.conversation_source = conversation_source or RealConversationSource(ui_lock=self.ui_lock)
         # 解密库优先：有钥匙就走真名真人数，没有就当没这条路（内存兜底）。
-        if hasattr(self.conversation_source, "wcdb_fn"):
-            try:
-                self.conversation_source.wcdb_fn = self.list_wcdb_conversations
-            except Exception:
-                LOGGER.debug("wcdb hookup failed", exc_info=True)
+        self._hook_wcdb(self.conversation_source)
+        #: 上一次列举走的是哪条路（`wcdb` / `memory`）。界面如实显示。
+        self.conversation_source_label = ""
         #: 没钥匙时点"读取"自动提一次。每个进程只试一次，重试走界面按钮。
         self._wcdb_ensure_attempted = False
         #: 界面链已移除：没有持续监听，只有定时轮询读解密库/内存。
         #: 实时性要求高的商户把轮询间隔调小，或点「读取」手动补读。
 
         # 注入了读取器 = 消息由调用方供给（测试替身、外部集成），那就是 members
-        # 语义：名单跟着一起递下去。生产路径不注入读取器，仍走 localdb/wcdb，
+        # 语义：名单跟着一起递下去。生产路径不注入读取器，走解密库（wcdb），
         # 所以这里只是把"谁在供消息"这件事说清楚，不是回落。
         effective_source = sender_source or (
-            "members" if history_reader_fn is not None else "localdb")
+            "members" if history_reader_fn is not None else "wcdb")
 
         self.history = HistoryReader(
             history_reader_fn or self._default_history_reader,
@@ -195,13 +182,13 @@ class MerchantApplication:
             # ? history_reader_fn ?????:??????????(????
             # 2 ???),????????????,????????
             group_members=group_members_fn or self._default_group_members,
-            # 群发送人来源。**空 = 自动**：注入了读取器就按 members 走
+            # 历史消息来源。**空 = 自动**：注入了读取器就按 members 走
             # （消息由调用方供给，名单是它的伴生参数）；生产不注入读取器，
-            # 走 localdb 内存 carve，有钥匙时自动升级 wcdb。
-            # 显式传值一律照用（测试要分别钉死三条路）。
+            # 走解密库直读（wcdb，先提取密钥）。退役旧名 localdb/avatar
+            # 也认，按 wcdb 走。显式传值一律照用（测试要分别钉死几条路）。
             sender_source=effective_source,
-            # 解密库直读：有钥匙才有，没有则按 localdb 内存路走。
-            # 只给真实来源接：模拟/测试来源用自己的替身，不碰真微信。
+            # 解密库直读：有钥匙才有。只给真实来源接：模拟/测试来源用自己的
+            # 替身，不碰真微信。
             wcdb_reader_fn=(self._wcdb_reader
                             if isinstance(self.conversation_source, RealConversationSource)
                             else None),
@@ -221,6 +208,7 @@ class MerchantApplication:
             tenant=tenant,
             orders=orders,
             is_product_logged_in=self.product_logged_in,
+            role_analyzer=self._run_role_analysis,
             on_step=self.events.on_step,
             on_log=self.events.on_log,
             on_wechat=self.events.on_wechat,
@@ -254,12 +242,23 @@ class MerchantApplication:
         self.wizard.client = client
         self.wizard.pipeline = self._pipeline()
         self.pipeline = self.wizard.pipeline
+        # 登录/启动恢复时已经从账户接口抓过一份套餐与额度（登录响应里带着，
+        # 也随凭证落了盘），搬到向导里 —— 界面（顶栏、首页、「智能整理」那一屏）
+        # 读的就是它，不用再联网查一次。取不到就保持原样。
+        self.wizard.adopt_subscription(getattr(session, "subscription", None))
         # 结果可能来自真实模型，也可能来自演示后端。标记必须准确。
         try:
             self.parse_service.model_executed = self.backend_is_model
         except AttributeError:
             # 不可变的桩对象：不强设，OrderPipeline 会按 False 处理。
             pass
+        # 登录页是向导外的前置门槛。**刚在浏览器里登录成功**就直接进流程第一屏，
+        # 不再要求商户在一个独立的「登录步骤」上再点一次下一步。
+        # 注意这不决定启动落点：启动时走的是 attach → ``resume()``（见
+        # ``web_server.create_server``），落点由 ``resume()`` 定，恢复出的登录态
+        # 照样停在登录页（那一屏写「已经登录」+「下一步」）。
+        if self.wizard.step == WizardStep.LOGIN:
+            self.wizard.advance()
         if self.events.on_logged_in:
             try:
                 self.events.on_logged_in()
@@ -314,6 +313,9 @@ class MerchantApplication:
         self.wizard.client = None
         self.wizard.pipeline = None
         self.pipeline = None
+        # 退出登录要**回到登录前置页**：门禁已经关上，界面不能停在原来的流程里
+        # （停在首页/核对页时，顶栏写着「未登录」，正文还是商户的经营数据）。
+        self.wizard.sign_out()
         self.refresh_home()
 
     def _pipeline(self) -> OrderPipeline:
@@ -325,7 +327,6 @@ class MerchantApplication:
             tenant=self.tenant,
             group=self.live_conversation_name(),
             parse_service=self.parse_service,
-            outbox=self.outbox,
             settings=self.auto,
             merger=self.merger,
             account_id=self.settings.account_id or "default",
@@ -405,7 +406,7 @@ class MerchantApplication:
     # -------------------------------------------------------------- ① 微信
 
     def product_logged_in(self) -> bool:
-        """产品账号是否已登录。第 1 步的放行判据只认它。"""
+        """产品账号是否已登录。进入办理流程的门槛只认它。"""
         return self.session is not None
 
     #: wxid 显示名备注的文件名。内存解不出的群名/人名，商户手备注一次，
@@ -437,7 +438,7 @@ class MerchantApplication:
 
         之前重画时只查备注表，内存辨认出的真名（``Conversation.name``）
         被 wxid 原文盖掉 —— 好不容易认出来的名字根本没画出来，
-        第 2 步看起来"一个群名都读不出"。只有备注和真名都没有时
+            第 1 步看起来"一个群名都读不出"。只有备注和真名都没有时
         才显示原始编号。
         """
         raw = str(getattr(item, "wxid", "") or getattr(item, "name", "") or "")
@@ -476,7 +477,7 @@ class MerchantApplication:
         before = self.wizard.settings.account_id
         status = self.wizard.check_wechat()
         after = self.wizard.settings.account_id
-        # 切号了：旧号的会话名单、缓存统统作废。不清掉，第 2 步会一直
+        # 切号了：旧号的会话名单、缓存统统作废。不清掉，第 1 步会一直
         # 显示上个号的群 —— 点进去读的也是错的。
         if before and after and before != after:
             self._clear_conversation_cache()
@@ -553,28 +554,34 @@ class MerchantApplication:
             return "还没有拉取过"
         return f"上次更新：{saved_at}" if saved_at else "还没有拉取过"
 
-    def refresh_conversations(self) -> list[Conversation]:
+    def refresh_conversations(self, *, force: bool = False) -> list[Conversation]:
         # 没钥匙先自动提一次（提完直接读，商户不用管中间步骤）。
         # 只对真实来源自动提：模拟/测试来源不需要钥匙，别去碰真微信。
         # 微信会新建分片/库（手机导入建 message_1.db），钥匙是旧的就
         # 覆盖不全 —— 磁盘上有没钥匙的库时也重提，但两次自动提取至少
         # 间隔 5 分钟，失败了反复扫内存只会越扫越慢，重试走界面按钮。
         if isinstance(self.conversation_source, RealConversationSource):
-            self._auto_ensure_wcdb_keys()
+            # force：用户点了「刷新列表」就不受 5 分钟节流限制，当场重提密钥。
+            self._auto_ensure_wcdb_keys(force=force)
         found = self.wizard.refresh_conversations()
-        if found:
+        # 记下这次走的是哪条路（解密库 / 内存扫描），界面要如实显示。
+        self.conversation_source_label = str(
+            getattr(self.conversation_source, "last_source", "") or "")
+        # 只有解密库那份（真名真人数）才值得落盘：内存扫描的名单残缺，
+        # 存下来只会让下次看起来还是不全。
+        if found and self.conversation_source_label == "wcdb":
             self._save_conversation_cache(found)
         if self.events.on_conversations:
             self.events.on_conversations(found)
         return found
 
-    def _auto_ensure_wcdb_keys(self) -> bool:
+    def _auto_ensure_wcdb_keys(self, *, force: bool = False) -> bool:
         """该补钥匙就补（没钥匙，或磁盘上有没钥匙的新库），返回钥匙齐否。
 
         5 分钟节流：失败了反复扫内存只会越扫越慢，重试走界面按钮。
         只对真实来源调用 —— 模拟/测试来源不需要钥匙，别去碰真微信。
         """
-        if not self._wcdb_auto_ensure_due():
+        if not self._wcdb_auto_ensure_due(force=force):
             return self._wcdb_keys_complete()
         self._wcdb_ensure_attempted = True
         try:
@@ -594,10 +601,14 @@ class MerchantApplication:
                 self._log(f"微信新建了 {len(unkeyed)} 个库还没钥匙，自动补提一次…")
             else:
                 self._log("本机数据库还没钥匙，自动提取一次（几十秒）…")
+            # 合规告知：确实在动微信的数据，就让商户看得见（不弹窗、不挡操作）。
+            self._notice("正在读取本机微信数据库（只读副本、用完即删）："
+                         "首次需要提取数据库密钥，约几十秒")
             try:
                 done, message = self.ensure_wcdb_keys()
             except Exception as exc:
                 done, message = False, f"提取失败：{exc}"
+            self._notice("")
             self._log("密钥已就绪" if done else
                       f"自动提取没成（{message}），可点按钮重试")
             return done
@@ -624,8 +635,42 @@ class MerchantApplication:
         except Exception:
             return []
 
-    def _wcdb_auto_ensure_due(self) -> bool:
-        """这次要不要自动提钥匙：没试过，或上次已超 5 分钟且仍有缺钥匙的库。"""
+    def replace_conversation_source(self, source: Any) -> None:
+        """换一个会话来源，并**重新接上解密库**。
+
+        出过的事故：宿主先把 `conversation_source` 换成带 ui_lock 的新对象，
+        而"注入 wcdb_fn"是在 `__init__` 时对**旧对象**做的 —— 换完就丢了。
+        结果界面**永远**走内存扫描（只有群、名字不全、没有好友），而解密库明明
+        是好的。所以换来源必须走这里，不要在别处直接赋值。
+        """
+        self.conversation_source = source
+        self._hook_wcdb(source)
+        # 向导手里的那份也换掉：**真正去列举的是它**。两处指向不同对象时，
+        # 界面读来源、向导读会话，各说各话（这次就是：向导走了解密库，
+        # 应用这层还记着旧对象，来源永远显示不出来）。
+        wizard = getattr(self, "wizard", None)
+        if wizard is not None:
+            try:
+                wizard.conversation_source = source
+            except Exception:
+                LOGGER.debug("wizard source sync failed", exc_info=True)
+
+    def _hook_wcdb(self, source: Any) -> None:
+        """把"读解密库"这条路挂到会话来源上。没有该属性的替身跳过。"""
+        if not hasattr(source, "wcdb_fn"):
+            return
+        try:
+            source.wcdb_fn = self.list_wcdb_conversations
+        except Exception:
+            LOGGER.debug("wcdb hookup failed", exc_info=True)
+
+    def _wcdb_auto_ensure_due(self, *, force: bool = False) -> bool:
+        """这次要不要自动提钥匙：没试过，或上次已超 5 分钟且仍有缺钥匙的库。
+
+        `force` 给用户明确点了刷新列表用：那一秒就是他要重试，节流不该拦。
+        """
+        if force:
+            return True
         if not getattr(self, "_wcdb_ensure_attempted", False):
             return True
         try:
@@ -818,13 +863,10 @@ class MerchantApplication:
         sender_source: str = "",
     ) -> None:
         def work() -> None:
-            # 读之前先保证钥匙齐（手机导入建了新分片时在这里补提，
-            # 不用商户回第 2 步）。后台线程里跑，不卡界面。
-            if isinstance(self.conversation_source, RealConversationSource):
-                try:
-                    self._auto_ensure_wcdb_keys()
-                except Exception:
-                    LOGGER.debug("read-time key ensure failed", exc_info=True)
+            # 开始读取**不**自动提取密钥：提取过程会扫描微信进程内存，耗时不可
+            # 预测，不能挂在"点了读取"后面让商户干等。缺密钥时由解密库读取返回
+            # 明确错误（"请先点「重新提取密钥」"），补钥匙有它自己的入口：
+            # 「刷新列表」会带 force 补一次（见 _auto_ensure_wcdb_keys）。
             result = self.wizard.read_history(
                 range_kind=range_kind, custom=custom, max_messages=max_messages,
                 on_progress=self.events.on_history_progress, mode=mode or ReadMode.RECENT,
@@ -903,130 +945,41 @@ class MerchantApplication:
         thread.join()
         return result_holder.get("summary")
 
-    # -------------------------------------------------------- ⑥ 模式/回执
+    def _run_role_analysis(self, role_id: str,
+                           message_ids: Sequence[str] | None = None) -> dict[str, Any]:
+        """Run a non-order role through the same account-backed AI service."""
+        from . import summary_task
 
-    def set_mode(self, mode: str) -> None:
-        self.auto.mode = mode
-        self.settings.auto = self.auto
-        self.settings_store.save(self.settings)
-        if mode == RunMode.PAUSED:
-            # Pausing does not discard anything: receipts already queued stay in
-            # the outbox and are dispatched when the merchant resumes.
-            self.refresh_home()
-            return (0, 0)
-        # Leaving pause releases held receipts, but **each one is re-validated
-        # first**. A receipt held twenty minutes ago may now point at a
-        # superseded order version, a conversation that is no longer selected,
-        # or a mode that no longer allows sending. Releasing the whole set
-        # blindly is how a customer gets told "your order is booked" after the
-        # order was already changed.
-        released, re_held = self._release_held_validated()
-        self.refresh_home()
-        return (released, re_held)
-
-    def _release_held_validated(self) -> tuple[int, int]:
-        """逐条重新核对 held 回执：通过的放回队列，不通过的继续暂缓。"""
-        live = self.live_conversation()
-        allowed = (live.name,) if live else ()
-        expected = self._latest_versions()
-        released = 0
-        re_held = 0
-        for command_id, target, payload in self.agent_store.held_commands():
-            version = int(payload.get("order_version", 0) or 0)
-            reason = ""
-            if not self.auto.sending_allowed:
-                reason = "mode_or_switch_disabled"
-            elif target not in allowed:
-                reason = "conversation_not_allowed"
-            elif expected and version < expected.get(target, version):
-                reason = "stale_order_version"
-            if reason:
-                self.agent_store.mark_hold(command_id, reason)
-                re_held += 1
-            else:
-                self.agent_store.release_held(command_id)
-                released += 1
-        return released, re_held
-
-    def pause(self) -> None:
-        self.set_mode(RunMode.PAUSED)
-
-    def resume(self) -> None:
-        self.set_mode(RunMode.AUTO_TAKE if self.auto.allow_local_automation else RunMode.BACKGROUND)
-
-    def set_allow_local_automation(self, allowed: bool) -> None:
-        """是否允许本机被自动接单占用。必须显式打开。"""
-        self.auto.allow_local_automation = bool(allowed)
-        self.settings.auto = self.auto
-        self.settings_store.save(self.settings)
-        self.refresh_home()
-
-    def dispatch_receipts(self) -> list[dict[str, Any]]:
-        """发送回执。暂停、模式不对、版本过期或草稿非空时都不发。"""
-        live = self.live_conversation()
-        allowed = (live.name,) if live else ()
-        expected = self._latest_versions()
-        sender = self._guarded_sender()
-        return self.outbox.dispatch(
-            allowed_targets=allowed,
-            paused=self.auto.mode == RunMode.PAUSED,
-            expected_versions=expected,
-            send=sender,
+        messages_override = None
+        if message_ids is not None:
+            ids = list(dict.fromkeys(str(value) for value in message_ids if value))
+            messages_override = []
+            if ids:
+                marks = ",".join("?" for _ in ids)
+                rows = self.orders.db.execute(
+                    "SELECT id, group_id, sender, content, sent_at, kind FROM messages "
+                    f"WHERE merchant_id=? AND id IN ({marks})",
+                    [self.tenant, *ids]).fetchall()
+                messages_override = [{
+                    "id": str(row["id"] or ""),
+                    "group_id": str(row["group_id"] or ""),
+                    "group_label": str(row["group_id"] or ""),
+                    "sender": str(row["sender"] or ""),
+                    "content": str(row["content"] or ""),
+                    "sent_at": str(row["sent_at"] or ""),
+                    "kind": str(row["kind"] or "text"),
+                } for row in rows]
+                try:
+                    from .media_attachments import attach_cached_files
+                    messages_override = attach_cached_files(messages_override)
+                except Exception:
+                    pass
+        return summary_task.run_summary(
+            self, self.wizard.history_result, role_id=role_id,
+            messages_override=messages_override,
+            on_progress=self.events.on_log,
+            on_stream=getattr(self.events, "on_analysis_stream", None),
         )
-
-    def _guarded_sender(self):
-        """真实发送走草稿守卫；没有守卫时不允许真的操作微信。"""
-        if self.target_inspector is None:
-            def refuse(target: str, text: str) -> None:
-                # Raise SendHeld, not a generic error: nothing was typed, so
-                # the receipt must go back to `held` and be retried later,
-                # not be marked as an unknown send.
-                raise SendHeld(
-                    SendCheck(False, SendVerdict.REAL_SENDING_DISABLED,
-                              "没有配置发送前检查器，已阻止真实发送")
-                )
-
-            return refuse
-        if self.send_guard is None:
-            self.send_guard = SafeReceiptSender(
-                self.target_inspector,
-                inner=self._raw_sender,
-                expected_account=self.settings.account_id,
-            )
-        return self._guard_or_raise
-
-    def _guard_or_raise(self, target: str, text: str) -> None:
-        assert self.send_guard is not None
-        verdict = self.send_guard.send(target, text)
-        if not verdict.ok:
-            raise SendHeld(verdict)
-
-    def set_sender(self, sender: Callable[[str, str], Any] | None) -> None:
-        """注入真实的发送实现。只有通过草稿守卫后才会被调用。"""
-        self._raw_sender = sender
-
-    def enable_target_inspection(self, inspector: TargetInspector, raw_sender: Callable[[str, str], Any] | None = None) -> None:
-        """配置发送前检查器。
-
-        真实发送入口在真机验证前保持关闭；:func:`real_sending_available`
-        为假时守卫一律暂缓，不会操作微信窗口。
-        """
-        self.target_inspector = inspector
-        self._raw_sender = raw_sender
-        self.send_guard = SafeReceiptSender(
-            inspector, inner=raw_sender, expected_account=self.settings.account_id
-        )
-
-    def _latest_versions(self) -> dict[str, int]:
-        """会话 -> 该会话当前最新订单版本。旧版本回执一律不发。"""
-        live = self.live_conversation()
-        if live is None:
-            return {}
-        row = self.orders.db.execute(
-            "SELECT MAX(version) AS version FROM orders WHERE merchant_id=? AND group_id=?",
-            (self.tenant, live.name),
-        ).fetchone()
-        return {live.name: int(row["version"] or 0)} if row and row["version"] is not None else {}
 
     # ------------------------------------------------------------- 模型
 
@@ -1273,7 +1226,10 @@ class MerchantApplication:
         view = HomeView()
         status = self.monitor.latest
         if status.state == WeChatState.UNREADABLE and status.detail == "尚未检测":
-            status = self.monitor.check_once()
+            # 只为了让首页显示真实状态，**不许推动向导**：探测会改状态、状态变化
+            # 会触发监视器回调，而那个回调会把向导往前推；首页只取状态，
+            # 不能借这个只读展示动作改变商户正在走的步骤。
+            status = self.monitor.check_once(notify=False)
         view.wechat_state = status.state
         view.wechat_detail = status.copy()[1]
         view.wechat_ready = status.ready
@@ -1296,10 +1252,6 @@ class MerchantApplication:
         elif live and not live.member_count and live.kind == ConversationKind.GROUP:
             view.conversation_note = "未能读到群人数，执行前请再次确认"
 
-        view.mode = self.auto.mode
-        view.mode_note = self.auto.describe()
-        view.send_block_reason = self._send_block_reason()
-        view.can_send = not view.send_block_reason
 
         view.effective = self.dashboard.effective_orders()
         view.actionable = self.dashboard.actionable_orders()
@@ -1314,35 +1266,14 @@ class MerchantApplication:
         view.scope_text = self.dashboard.scope_text()
 
         quota = self.wizard.quota
-        view.quota_headline = quota.headline()
+        # 没查过额度就**不写**这一句：默认 QuotaView 讲的是"未登录产品账号"，
+        # 而此刻明明登录着 —— 首页那行会变成「微信正常　未登录产品账号」。
+        view.quota_headline = quota.headline() if quota.logged_in else ""
         view.quota_ok = quota.sufficient
 
-        view.pending_receipts = self.outbox.pending_count()
-        view.unknown_receipts = self.outbox.unknown_count()
-        view.failed_receipts = self.outbox.failed_count()
-        # 发送异常 = 没发出去的 + 结果无法确认的。两类都需要商户知道。
-        view.send_errors = view.unknown_receipts + view.failed_receipts
         if self.history_result is not None:
             view.last_actual_range = self.history_result.actual_range_text()
         return view
-
-    def _send_block_reason(self) -> str:
-        """为什么现在发不出去。空字符串表示可以发。
-
-        真实发送在真机验证前是关着的，所以这一栏**永远**要有话说 ——
-        否则商户看到「可发送」却发现什么都没发出去。
-        """
-        if not real_sending_available():
-            return "真实发送尚未在真机验证，目前只整理不发送"
-        if self.auto.mode == RunMode.PAUSED:
-            return "已暂停发送"
-        if not self.auto.allow_local_automation:
-            return "尚未允许本机自动操作"
-        if not self.auto.auto_reply:
-            return "已关闭自动回复"
-        if self.target_inspector is None:
-            return "尚未配置发送前检查器"
-        return ""
 
     @property
     def history_result(self) -> HistoryResult | None:
@@ -1359,12 +1290,27 @@ class MerchantApplication:
         return view
 
     def orders_for_display(self) -> list[OrderRow]:
-        """界面上「查看订单」列出的内容：有效订单 + 需要处理的。"""
+        """界面上「查看订单」列出的内容：**需要商户处理的**订单。
+
+        也就是 ``review`` / ``cancel_review`` 两种状态 —— 自动记单（``draft``）
+        **不在这里逐条列**：那正是自动化的目的，它们已经按商品汇总进首页的
+        「今日备货」了。（旧文档写的是"有效订单 + 需要处理的"，和实现对不上；
+        实际上 ``actionable_orders()`` 也是按同一组状态过滤的，
+        ``or item.order_id in actionable`` 那半边并不放宽范围。）
+        """
         actionable = {item.order_id for item in self.dashboard.actionable_orders()}
         rows = self.dashboard.effective_orders()
         return [item for item in rows if item.status in ACTIONABLE_STATUSES or item.order_id in actionable]
 
     # ------------------------------------------------------------ internals
+
+    def _notice(self, text: str) -> None:
+        """给界面一句不打断人的告知。没有订阅者就什么也不做。"""
+        if self.events.on_notice:
+            try:
+                self.events.on_notice(str(text))
+            except Exception:
+                pass
 
     def _error(self, message: str) -> None:
         if self.events.on_error:
@@ -1375,21 +1321,20 @@ class MerchantApplication:
 
     @staticmethod
     def _default_history_reader(**kwargs: Any) -> list[dict[str, Any]]:
-        # 界面链已移除：没有注入读取器时不碰微信窗口，直接明说。
-        # 生产里这条走不到（解密库/内存两条路在 HistoryReader 内部），
+        # 界面链和内存 carve 都已退役：没有注入读取器时不碰微信窗口，直接明说。
+        # 生产里这条走不到（解密库那条路在 HistoryReader 内部），
         # 撞到这里说明装配错了，别静默读个空。
-        raise RuntimeError("界面读取已移除：先点「重新提取密钥」走解密库，或用内存路读取")
+        raise RuntimeError("界面读取已移除：请先点「重新提取密钥」走解密库")
 
     def _default_group_members(conversation: Any) -> list[str]:
         # 界面链已移除：取成员要打开微信界面，这条路没有了。
-        # 生产默认 sender_source 已是 localdb/wcdb，走不到这里；
+        # 生产默认 sender_source 已是 wcdb（解密库），走不到这里；
         # 撞到说明有人显式传了 members 却没注入名单，返回空让发送人写 wxid，
         # 不中断读取（消息本身还能读）。
         return []
 
     def close(self) -> None:
         self.stop()
-        self.outbox.close()
         self.cursor.close()
         # merge.db 也是 sqlite 连接。以前这里漏了 merger，于是 Windows 上
         # 临时目录删不掉：测试在 tearDown 报 WinError 32「文件被另一个进程占用」，

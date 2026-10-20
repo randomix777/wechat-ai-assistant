@@ -18,12 +18,21 @@ import sqlite3
 import struct
 import sys
 import tempfile
+import time
 import unittest
 import unittest.mock
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT / "src"))
+
+#: 消息时间戳跟着真实时钟走（真实时钟 - 1 小时）。
+#:
+#: 写死的 unix 时间戳配上**相对**的读取窗口（now - 7 天）是一颗定时炸弹：
+#: 这条测试是 2026-10-13 写的，锚点也是那天，于是 2026-10-20（正好七天）
+#: 就红了 —— 没人知道为什么，还差点被当成"是不是我改坏的"。
+#: `tests/test_no_time_bomb.py` 守着这条：锚点必须跟着真实时钟。
+RECENT_TIMESTAMP = int(time.time()) - 3600
 
 from wechat_ai_assistant import wcdb  # noqa: E402
 from wechat_ai_assistant.conversations import (  # noqa: E402
@@ -126,9 +135,9 @@ def _session_db(path: Path) -> None:
         con.execute("CREATE TABLE SessionTable (username TEXT, type INTEGER, "
                     "last_timestamp TEXT, summary TEXT, sort_timestamp INTEGER)")
         con.execute("INSERT INTO SessionTable VALUES (?,?,?,?,?)",
-                    ("g1@chatroom", 0, "1791900000", "苹果两箱", 99))
+                    ("g1@chatroom", 0, str(RECENT_TIMESTAMP), "苹果两箱", 99))
         con.execute("INSERT INTO SessionTable VALUES (?,?,?,?,?)",
-                    ("wxid_a", 0, "1791800000", "好的", 98))
+                    ("wxid_a", 0, str(RECENT_TIMESTAMP - 100000), "好的", 98))
         con.commit()
     finally:
         con.close()
@@ -156,7 +165,7 @@ class ReadTests(unittest.TestCase):
         self.assertEqual([g.username for g in got], ["g1@chatroom", "wxid_a"])
         self.assertEqual(got[0].display, "鲜果备注")
         self.assertEqual(got[0].member_count, 2)
-        self.assertEqual(got[0].last_timestamp, 1791900000)
+        self.assertEqual(got[0].last_timestamp, RECENT_TIMESTAMP)
         self.assertEqual(got[0].summary, "苹果两箱")
         self.assertEqual(got[1].kind, "friend")
 
@@ -332,12 +341,12 @@ def _message_db(path: Path, username: str) -> None:
                     "local_type INTEGER, sort_seq INTEGER, create_time INTEGER, "
                     "message_content TEXT)" % table)
         con.execute("INSERT INTO %s VALUES (?,?,?,?,?,?)" % table,
-                    (1, 777, 1, 1000, 1791900000, "wxid_a:\n苹果两箱"))
+                    (1, 777, 1, 1000, RECENT_TIMESTAMP, "wxid_a:\n苹果两箱"))
         con.execute("INSERT INTO %s VALUES (?,?,?,?,?,?)" % table,
-                    (2, 0, 10000, 1001, 1791900060,
+                    (2, 0, 10000, 1001, RECENT_TIMESTAMP + 60,
                      "<sysmsg>wxid_a 加入了群聊</sysmsg>"))
         con.execute("INSERT INTO %s VALUES (?,?,?,?,?,?)" % table,
-                    (3, 778, 3, 1002, 1791900120, "聊天图片"))
+                    (3, 778, 3, 1002, RECENT_TIMESTAMP + 120, "聊天图片"))
         con.commit()
     finally:
         con.close()
@@ -369,7 +378,7 @@ class ReadMessagesTests(unittest.TestCase):
         text, system, image = got
         self.assertEqual((text.sender_username, text.sender_display,
                           text.content, text.kind, text.timestamp),
-                         ("wxid_a", "张姐", "苹果两箱", "文本", 1791900000))
+                         ("wxid_a", "张姐", "苹果两箱", "文本", RECENT_TIMESTAMP))
         self.assertTrue(text.source_id.startswith("wcdb-777"))
         self.assertEqual(system.kind, "系统通知")
         self.assertIn("加入了群聊", system.content)
@@ -439,7 +448,7 @@ class ZstdMessagesTests(unittest.TestCase):
                              "local_type INTEGER, sort_seq INTEGER, create_time INTEGER, "
                              "message_content BLOB)" % table)
                 mcon.execute("INSERT INTO %s VALUES (?,?,?,?,?,?)" % table,
-                             (1, 999, 1, 1000, 1791900000, frame))
+                             (1, 999, 1, 1000, RECENT_TIMESTAMP, frame))
                 mcon.commit()
             finally:
                 mcon.close()
@@ -450,6 +459,144 @@ class ZstdMessagesTests(unittest.TestCase):
                              ("wxid_a", "张姐", "压缩长文本", "文本"))
         finally:
             tmp.cleanup()
+
+
+class MemberNameHintTests(unittest.TestCase):
+    """微信没给群名时，用成员名拼一个替代名。
+
+    真机上的样子：``18815684683@chatroom`` 这类群，``contact`` 行的
+    ``remark`` 和 ``nick_name`` 都是空（群从没在这台设备上命名/同步过），
+    但 ``chatroom_member`` 里成员和名字是齐的。不拼这一层，界面上就只剩
+    一串群 ID —— 商户会以为"没读出来"。
+    """
+
+    def _db(self, rows, members):
+        """rows: [(id, username, remark, nick), ...]；members: [(room_id, member_id), ...]"""
+        tmp = tempfile.TemporaryDirectory(prefix="pyw-hint-")
+        path = Path(tmp.name) / "contact.db"
+        con = sqlite3.connect(str(path))
+        try:
+            con.execute("CREATE TABLE contact (id INTEGER PRIMARY KEY, username TEXT, "
+                        "remark TEXT, nick_name TEXT, local_type INTEGER)")
+            con.execute("CREATE TABLE chatroom_member (room_id INTEGER, member_id INTEGER)")
+            con.executemany("INSERT INTO contact VALUES (?,?,?,?,1)", rows)
+            con.executemany("INSERT INTO chatroom_member VALUES (?,?)", members)
+            con.commit()
+        finally:
+            con.close()
+        return tmp, path
+
+    def test_the_hint_leaves_myself_out(self):
+        """拼替代名时排除自己 —— 商户知道自己在群里，看自己名字没信息量。
+
+        微信 PC 端也是这么显示的。自己的 wxid 从 ``db_storage`` 的上级目录名
+        推出来（``wxid_xxx_a064`` → ``wxid_xxx``）。
+        """
+        tmp, path = self._db(
+            [(1, "g@chatroom", "", ""),
+             (2, "wxid_me", "", "我自己"),
+             (3, "wxid_a", "甲", ""),
+             (4, "wxid_b", "", "乙")],
+            [(1, 2), (1, 3), (1, 4)])
+        try:
+            con = sqlite3.connect(str(path))
+            con.row_factory = sqlite3.Row
+            try:
+                hint = wcdb.member_name_hint(con, "g@chatroom", ("wxid_me",))
+            finally:
+                con.close()
+        finally:
+            tmp.cleanup()
+        self.assertEqual(hint, "甲、乙", "自己不该出现在替代名里")
+
+    def test_self_account_candidates_come_from_the_folder_name(self):
+        """``xwechat_files/<账号>/db_storage`` 的目录名带登录后缀，要能剥出来。"""
+        self.assertEqual(wcdb.self_account_candidates("wxid_0201382014011_a064"),
+                         ("wxid_0201382014011_a064", "wxid_0201382014011"))
+        self.assertEqual(wcdb.self_account_candidates("dzy411567179"), ("dzy411567179",))
+        self.assertEqual(wcdb.self_account_candidates(""), ())
+
+    def test_my_own_account_is_not_listed_as_a_contact(self):
+        """自己在 ``contact`` 里也是 ``local_type=1``，不排除就会变成可勾选的"联系人"。
+
+        真机上出现过：列表里多出一个自己的名字「RandomixV24」，商户读自己的消息没有意义。
+        """
+        tmp, path = self._db(
+            [(1, "wxid_me", "", "我自己"), (2, "wxid_friend", "张姐", "")],
+            [])
+        try:
+            friends = {item.username for item in wcdb.read_all_friends(path, ("wxid_me",))}
+            everyone = {item.username for item in wcdb.read_all_friends(path)}
+        finally:
+            tmp.cleanup()
+        self.assertNotIn("wxid_me", friends, "自己不该出现在联系人列表里")
+        self.assertIn("wxid_friend", friends)
+        self.assertIn("wxid_me", everyone, "不传排除名单时保持原样（纯函数不改语义）")
+
+    def test_the_hint_is_built_from_member_names(self):
+        tmp, path = self._db(
+            [(1, "18815684683@chatroom", "", ""),
+             (2, "wxid_a", "庄超", ""),
+             (3, "wxid_b", "", "董子源"),
+             (4, "wxid_c", "", "TLT")],
+            [(1, 2), (1, 3), (1, 4)])
+        try:
+            con = sqlite3.connect(str(path))
+            con.row_factory = sqlite3.Row
+            try:
+                hint = wcdb.member_name_hint(con, "18815684683@chatroom")
+            finally:
+                con.close()
+        finally:
+            tmp.cleanup()
+        self.assertEqual(hint, "庄超、董子源、TLT", "备注优先、按成员顺序拼")
+
+    def test_a_crowded_group_ends_with_deng(self):
+        """多于 3 人时只列 3 个 + 「等」（和微信 PC 端一致）。"""
+        tmp, path = self._db(
+            [(1, "g@chatroom", "", ""),
+             (2, "wxid_a", "甲", ""), (3, "wxid_b", "乙", ""),
+             (4, "wxid_c", "丙", ""), (5, "wxid_d", "丁", "")],
+            [(1, 2), (1, 3), (1, 4), (1, 5)])
+        try:
+            con = sqlite3.connect(str(path))
+            con.row_factory = sqlite3.Row
+            try:
+                hint = wcdb.member_name_hint(con, "g@chatroom")
+            finally:
+                con.close()
+        finally:
+            tmp.cleanup()
+        self.assertEqual(hint, "甲、乙、丙等")
+
+    def test_no_named_members_means_no_hint(self):
+        """一个成员名都没有就不编 —— 让调用方继续用「未命名群聊」。"""
+        tmp, path = self._db(
+            [(1, "g@chatroom", "", ""), (2, "wxid_a", "", ""), (3, "wxid_b", "", "")],
+            [(1, 2), (1, 3)])
+        try:
+            con = sqlite3.connect(str(path))
+            con.row_factory = sqlite3.Row
+            try:
+                hint = wcdb.member_name_hint(con, "g@chatroom")
+            finally:
+                con.close()
+        finally:
+            tmp.cleanup()
+        self.assertEqual(hint, "")
+
+    def test_read_all_groups_carries_the_hint_only_for_unnamed_groups(self):
+        tmp, path = self._db(
+            [(1, "g@chatroom", "", ""), (2, "named@chatroom", "有名字", "昵称"),
+             (3, "wxid_a", "庄超", ""), (4, "wxid_b", "", "董子源")],
+            [(1, 3), (1, 4)])
+        try:
+            groups = {item.username: item for item in wcdb.read_all_groups(path)}
+        finally:
+            tmp.cleanup()
+        self.assertEqual(groups["g@chatroom"].display_hint, "庄超、董子源")
+        self.assertEqual(groups["named@chatroom"].display_hint, "",
+                         "微信给了名字就不需要替代名")
 
 
 class HistoryWcdbRoutingTests(unittest.TestCase):
@@ -511,6 +658,36 @@ class HistoryWcdbRoutingTests(unittest.TestCase):
         finally:
             tmp.cleanup()
 
+    def _source_ids(self, fake) -> list[str]:
+        from wechat_ai_assistant.conversations import Conversation, ConversationKind
+
+        history = self._history(fake)
+        conv = Conversation(name="群", kind=ConversationKind.GROUP, wxid="g@chatroom")
+        return [str(row.get("source_id", "")) for row in history._read_one(conv, 10)]
+
+    def test_stable_source_id_survives_a_sender_rename(self):
+        """同一条重读，发送人（备注名）变了 id 也不变 —— 否则改个备注就多一条。
+
+        反转记录：这条契约原来长在内存路上（``test_localdb`` 用合成记录算
+        群+内容+时间）。内存路退役后它属于解密库：id 按（服务端 id，或本地
+        id + 时间）算，发送人只影响发送人一列。
+        """
+        tmp, contact, message = self._dbs()
+        try:
+            first = self._source_ids(HistoryWcdbRoutingTests._FakeReader(contact, message))
+            con = sqlite3.connect(str(contact))
+            try:
+                con.execute("UPDATE contact SET remark='苹果哥' WHERE username='wxid_a'")
+                con.commit()
+            finally:
+                con.close()
+            second = self._source_ids(HistoryWcdbRoutingTests._FakeReader(contact, message))
+            self.assertTrue(first, "先得真读到东西，空表比不出什么")
+            self.assertTrue(all(item.startswith("wcdb-") for item in first))
+            self.assertEqual(first, second, "只改了备注名，id 不该跟着变")
+        finally:
+            tmp.cleanup()
+
     def test_no_reader_stays_on_members(self):
         from wechat_ai_assistant.conversations import Conversation, ConversationKind
         from wechat_ai_assistant.history_read import HistoryReader, HistoryRange, ReadMode
@@ -549,8 +726,7 @@ class EnsureKeysEncodingTests(unittest.TestCase):
             data_dir=Path(tmp), orders=store, tenant=merchant["merchant_id"],
             probe=SimulatedWeChat([WeChatState.LOGGED_IN]),
             conversation_source=SimulatedConversations([]),
-            history_reader_fn=SimulatedHistory(default_count=0),
-            sender=lambda t, x: None)
+            history_reader_fn=SimulatedHistory(default_count=0),)
         return app, store
 
     def test_inprocess_extract_no_subprocess_no_console(self):
@@ -633,8 +809,7 @@ class RefreshAutoEnsureTests(unittest.TestCase):
             data_dir=Path(tmp), orders=store, tenant=merchant["merchant_id"],
             probe=SimulatedWeChat([WeChatState.LOGGED_IN]),
             conversation_source=source,
-            history_reader_fn=SimulatedHistory(default_count=0),
-            sender=lambda t, x: None)
+            history_reader_fn=SimulatedHistory(default_count=0),)
         return app, store
 
     def _run(self, app, status, ensure):
@@ -647,6 +822,26 @@ class RefreshAutoEnsureTests(unittest.TestCase):
                                        return_value=None):
             app.refresh_conversations()
             return mocked
+
+    def test_extracting_keys_tells_the_merchant_without_blocking(self):
+        """提密钥会读微信的数据库，必须**说出来**；但只是横幅一句话，不弹窗。
+
+        合规上这叫知情告知：用户不必点"同意"，但得看得见软件正在动什么。
+        提取结束要撤掉，横幅不能挂在那里当常驻文案。
+        """
+        tmp = tempfile.TemporaryDirectory(prefix="pyw-auto-notice-")
+        self.addCleanup(tmp.cleanup)
+        app, store = self._app(tmp.name)
+        self.addCleanup(store.close)
+        self.addCleanup(app.close)
+
+        seen: list[str] = []
+        app.events.on_notice = seen.append
+        self._run(app, (False, "没钥匙"), lambda: (True, "ok"))
+
+        self.assertTrue(seen, "提取密钥时一句告知都没有")
+        self.assertIn("读取本机微信数据库", seen[0])
+        self.assertEqual(seen[-1], "", "提取完要把那句小字撤掉")
 
     def test_missing_keys_auto_ensures_once(self):
         tmp = tempfile.TemporaryDirectory(prefix="pyw-auto-")
@@ -708,8 +903,7 @@ class RefreshAutoEnsureTests(unittest.TestCase):
                 tenant=merchant["merchant_id"],
                 probe=SimulatedWeChat([WeChatState.LOGGED_IN]),
                 conversation_source=SimulatedConversations([]),
-                history_reader_fn=SimulatedHistory(default_count=0),
-                sender=lambda t, x: None)
+                history_reader_fn=SimulatedHistory(default_count=0),)
             try:
                 with unittest.mock.patch.object(
                         app, "ensure_wcdb_keys",
@@ -766,27 +960,30 @@ class RefreshAutoEnsureTests(unittest.TestCase):
             except PermissionError:
                 pass
 
-    def test_read_history_auto_ensures_in_background(self):
-        """点读取也在后台线程里补钥匙：用户不用回第 2 步。"""
+    def test_reading_does_not_scan_memory_for_keys(self):
+        """点读取**不**顺手扫进程内存补钥匙 —— 补钥匙有它自己的入口。
+
+        反转记录：这条原来要求"点读取也在后台线程里补钥匙，用户不用回第 2 步"。
+        提取密钥要扫微信进程内存、耗时不可预测，挂在"点了读取"后面就是让商户
+        对着不动的一屏干等；现在缺钥匙由解密库读取直接报"点「重新提取密钥」"，
+        补钥匙走「刷新列表」（带 force，见 ``test_missing_keys_auto_ensures_once``）。
+        """
         import time as _time
 
         tmp = tempfile.TemporaryDirectory(prefix="pyw-auto-")
         try:
             app, store = self._app(tmp.name)
             try:
-                calls: list = []
-                done = _time.time() + 10
-                with unittest.mock.patch.object(
-                        app, "_auto_ensure_wcdb_keys",
-                        side_effect=lambda: calls.append(1) or True), \
+                with unittest.mock.patch.object(app, "_auto_ensure_wcdb_keys") as ensure, \
                     unittest.mock.patch.object(
                         app.wizard, "read_history") as read_mock, \
                     unittest.mock.patch.object(app, "refresh_home"):
                     app.read_history(mode="update", sender_source="wcdb")
-                    while not calls and _time.time() < done:
+                    done = _time.time() + 10
+                    while not read_mock.called and _time.time() < done:
                         _time.sleep(0.05)
-                self.assertEqual(len(calls), 1)
-                self.assertTrue(read_mock.called)
+                self.assertTrue(read_mock.called, "读取本身要真的跑")
+                self.assertFalse(ensure.called, "读取不该顺手扫内存补钥匙")
             finally:
                 app.close()
                 store.close()
@@ -830,12 +1027,12 @@ class MultiShardTests(unittest.TestCase):
         self.m1 = Path(self.tmp.name) / "m1.db"
         # 旧分片 2 条，新分片 1 条新的 + 1 条重复（同 server_id）。
         self._shard(self.m0, "g@chatroom", [
-            (1, 101, 1, 1000, 1791900000, "wxid_a:\n第一条"),
-            (2, 102, 1, 1001, 1791900060, "wxid_a:\n第二条"),
+            (1, 101, 1, 1000, RECENT_TIMESTAMP, "wxid_a:\n第一条"),
+            (2, 102, 1, 1001, RECENT_TIMESTAMP + 60, "wxid_a:\n第二条"),
         ])
         self._shard(self.m1, "g@chatroom", [
-            (1, 102, 1, 1001, 1791900060, "wxid_a:\n第二条"),
-            (2, 103, 1, 2000, 1791999999, "wxid_a:\n第三条"),
+            (1, 102, 1, 1001, RECENT_TIMESTAMP + 60, "wxid_a:\n第二条"),
+            (2, 103, 1, 2000, RECENT_TIMESTAMP + 999999, "wxid_a:\n第三条"),
         ])
 
     def tearDown(self):

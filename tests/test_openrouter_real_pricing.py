@@ -108,7 +108,7 @@ class NoModelPaysTheMerchantTests(unittest.TestCase):
         self.assertGreater(units, 0, "最贵的模型也不能算出非正费用")
 
     def test_the_merchant_pays_ten_times_the_vendor(self):
-        """1 美元上游 = 10 美元账单，这是商家定���的。"""
+        """1 美元上游 = 10 美元账单，这是商家定好的。"""
         price = price_from_mapping(REAL_SONNET)
         vendor_usd = 1000 * 2e-06 + 200 * 1e-05
         units = merchant_micro_usd_for(vendor_usd)

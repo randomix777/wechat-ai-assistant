@@ -2,6 +2,10 @@
 
 用小群，尽量少占用微信窗口。两次读之间不引入新消息，第二次应当明确回答
 "没有发现上次之后的新消息" —— 这正是「更新」该有的行为。
+
+**这不是生产路径**（生产只走解密库直读）：这里注入 ``Messages.dump_chat_history``
+来单独验收"更新/游标"这套逻辑，注入读取器 = ``members`` 语义，必须显式写
+``sender_source="members"``。
 """
 from __future__ import annotations
 
@@ -33,7 +37,8 @@ def main() -> int:
     conversation = Conversation(name=TARGET, kind=ConversationKind.GROUP, member_count=MEMBERS)
     window = TimeWindow(start_delta=timedelta(days=3650), label="wide")
     cursor = HistoryCursor(":memory:")
-    reader = HistoryReader(reader=Messages.dump_chat_history, cursor=cursor)
+    reader = HistoryReader(reader=Messages.dump_chat_history, cursor=cursor,
+                           sender_source="members")
 
     def report(progress):
         if progress.messages_read:

@@ -78,33 +78,9 @@ class UiaProbeTests(unittest.TestCase):
         self.assertTrue(uia_automation_available("v1"), "同版本必须走缓存")
         self.assertFalse(uia_automation_available("v2"), "换版本重探")
 
-    def test_default_sender_is_localdb(self):
-        # 界面链已移除：默认值恒为 localdb，不再问探针。
-        # 有钥匙时读取层自动升级 wcdb，这里只管默认。
-        self.assertEqual(default_sender_source(), "localdb")
-
-
-class UiGateTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        root = Path(__file__).resolve().parent.parent
-        cls.source = (root / "src" / "wechat_ai_assistant" / "merchant_ui.py").read_text(
-            encoding="utf-8")
-
-    def test_listen_and_auto_have_no_ui_entry(self):
-        """监听与自动发送的界面入口不存在（早就撤了，这里钉死别加回来）。"""
-        for gone in ('text="开始持续监听"', 'text="后台整理',
-                     'text="开启自动接单与回复',
-                     "def _on_toggle_listen", "def _on_enable_auto",
-                     "def _build_listen_box"):
-            self.assertNotIn(gone, self.source)
-
-    def test_dead_ui_disables_list_matching(self):
-        # 认人选项已砍掉：第 3 步只有数据库直读，没有"发送人怎么认"可选。
-        self.assertNotIn("发送人怎么认：", self.source)
-        start = self.source.index("def _on_read_history")
-        block = self.source[start:start + 1500]
-        self.assertIn('"wcdb"', block)
+    def test_default_sender_is_wcdb(self):
+        # 界面链和内存 carve 都已退役：默认值恒为 wcdb（解密库），不再问探针。
+        self.assertEqual(default_sender_source(), "wcdb")
 
 
 class NoUiaCallsTests(unittest.TestCase):
@@ -181,6 +157,62 @@ class NoUiaCallsTests(unittest.TestCase):
                 if isinstance(node, ast.Attribute) and node.attr in self.FORBIDDEN_ATTRS:
                     offenders.append(f"{name}: .{node.attr}(...)")
         self.assertEqual(offenders, [], "生产代码还在调用操窗方法")
+
+
+class SendingIsGoneTests(unittest.TestCase):
+    """产品里**不许再有任何「往微信里发消息」的实现**。
+
+    ## 为什么删，而且为什么钉死
+
+    这些函数的最后一步都是「点输入框 → 粘贴 → 按 alt+s」。而现在的读取路径是
+    解密数据库、不碰窗口；UIA 在新版微信上也不可用 —— 也就是说这条发送路径
+    **本来就走不通**。留着它只会让"这个软件会替你回客户"变成一句随时可能被
+    重新实现的承诺。
+
+    两条断言：
+    1. 这些函数名在源码里完全不存在（不是"没被调用"，而是**没有**）；
+    2. 源码里不再出现「按 alt+s」这个发送动作。
+    """
+
+    #: 已移除的发送实现（含自动回复、带引用回复、发文件、发语音）。
+    REMOVED_APIS = (
+        "send_messages_to_friend", "send_messages_to_friends",
+        "send_files_to_friend", "send_files_to_friends",
+        "send_audios_to_friend", "reply_with_quote",
+        "auto_reply_to_friend", "auto_reply_messages",
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = Path(__file__).resolve().parent.parent / "src" / "wechat_ai_assistant"
+
+    def test_no_sending_function_exists_anywhere(self):
+        import ast
+
+        found = []
+        for path in sorted(self.root.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if node.name in self.REMOVED_APIS:
+                        found.append(f"{path.name}:{node.lineno}: {node.name}()")
+        self.assertEqual(
+            found, [],
+            "发送实现又被加回来了（产品只读，不发消息）：\n  " + "\n  ".join(found))
+
+    def test_nothing_presses_send(self):
+        """`alt+s` 是微信发送消息的快捷键 —— 源码里（含注释）不该再有。"""
+        import re
+
+        pattern = re.compile(r"hotkey\(\s*['\"]alt['\"]\s*,\s*['\"]s['\"]")
+        offenders = []
+        for path in sorted(self.root.glob("*.py")):
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if pattern.search(line):
+                    offenders.append(f"{path.name}:{number}: {line.strip()[:60]}")
+        self.assertEqual(
+            offenders, [],
+            "还有代码在按发送快捷键：\n  " + "\n  ".join(offenders))
 
 
 if __name__ == "__main__":

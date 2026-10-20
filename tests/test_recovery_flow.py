@@ -89,10 +89,15 @@ class RecoveryHarness(unittest.TestCase):
             # 2 秒上下，在没有微信的环境里直接失败），测试拿假读取器却走真解析器
             # 会被它拖垮时序。默认给空 —— 需要发送人的测试自己覆盖。
             group_members_fn=kwargs.pop("group_members_fn", lambda conv: []),
-            sender=kwargs.pop("sender", lambda t, x: None),
             simulated=True,
         )
         app.attach(object(), StubClient(), StubParse(), backend_is_model=False)
+        # 真实启动顺序：attach 恢复登录态 → 刷会话列表 → ``resume()`` 定落点
+        # （``web_server.create_server`` 就是这个顺序）。落点**只认 resume()**：
+        # attach 里那次 advance 是给"刚在浏览器里登录成功"的商户少点一下用的，
+        # 不该替启动恢复决定停在哪一屏。
+        app.refresh_conversations()
+        app.wizard.resume()
         self.apps.append(app)
         return app
 
@@ -111,14 +116,13 @@ class SettingsPersistenceTests(unittest.TestCase):
         settings = MerchantSettings()
         settings.account_id = "wxid_abc"
         settings.history_conversations = ["cv_1", "cv_2"]
-        settings.auto = AutoOrderSettings(mode=RunMode.AUTO_TAKE, allow_local_automation=True)
+        settings.auto = AutoOrderSettings(mode=RunMode.BACKGROUND)
         settings.wizard_complete = True
         store.save(settings)
         restored = SettingsStore(self.dir / "settings.json").load()
         self.assertEqual(restored.account_id, "wxid_abc")
         self.assertEqual(restored.history_conversations, ["cv_1", "cv_2"])
-        self.assertEqual(restored.auto.mode, RunMode.AUTO_TAKE)
-        self.assertTrue(restored.auto.allow_local_automation)
+        self.assertEqual(restored.auto.mode, RunMode.BACKGROUND)
         self.assertTrue(restored.wizard_complete)
 
     def test_a_corrupt_settings_file_does_not_stop_the_software(self):
@@ -141,22 +145,27 @@ class SettingsPersistenceTests(unittest.TestCase):
         self.assertEqual(settings.history_conversations, [])
         self.assertFalse(settings.wizard_complete, "换账号后必须重新绑定会话")
 
-    def test_completed_wizard_is_not_shown_again(self):
+    def test_finishing_the_wizard_does_not_change_the_start_step(self):
+        """走完过向导也只影响「有没有首页可回」，不改启动落点：永远是登录前置页。
+
+        反转记录：这里以前自带一份 ``_needs_wizard``（照抄 ``Wizard`` 里那个
+        按"完成过/换过号"判断要不要重走向导的方法）。那个方法随启动落点一起
+        删了 —— 商户要的是每次打开都从头看一眼，所以副本也跟着去掉，
+        改成用真实 API 钉住现状。
+        """
+        from wechat_ai_assistant.conversations import ConversationRegistry
         from wechat_ai_assistant.runmode import MerchantSettings
+        from wechat_ai_assistant.wizard import Wizard, WizardStep
 
+        store = SettingsStore(self.dir / "settings.json")
         settings = MerchantSettings()
-        settings.wizard_complete = True
         settings.account_id = "wxid_a"
-        self.assertFalse(_needs_wizard(settings, "wxid_a"))
-        self.assertTrue(_needs_wizard(settings, "wxid_b"), "换了微信账号必须重走向导")
-        empty = MerchantSettings()
-        self.assertTrue(_needs_wizard(empty, "wxid_a"), "第一次启动必须走向导")
+        settings.wizard_complete = True
+        store.save(settings)
 
-
-def _needs_wizard(settings, account_id: str) -> bool:
-    if not settings.wizard_complete:
-        return True
-    return bool(account_id and settings.account_id and account_id != settings.account_id)
+        wizard = Wizard(store, None, ConversationRegistry(), None, tenant="t")
+        self.assertEqual(wizard.resume(), WizardStep.LOGIN)
+        self.assertTrue(wizard.has_finished(), "首页还是回的去的")
 
 
 class ThreadHygieneTests(RecoveryHarness):
@@ -191,29 +200,18 @@ class CrashRecoveryTests(RecoveryHarness):
     def test_a_restart_recovers_orders_and_settings(self):
         app = self.make_app()
         app.choose_live_conversation(app.refresh_conversations()[0])
-        app.set_mode(RunMode.AUTO_TAKE)
-        app.set_allow_local_automation(True)
         app.close()
         self.apps.remove(app)
 
         restarted = self.make_app()
-        self.assertEqual(restarted.auto.mode, RunMode.AUTO_TAKE, "重启后模式必须恢复")
-        self.assertTrue(restarted.auto.allow_local_automation)
-        self.assertEqual(restarted.wizard.step, WizardStep.WECHAT)
+        self.assertEqual(restarted.auto.mode, RunMode.BACKGROUND,
+                         "产品只有后台整理一种模式，重启后也必须是它")
+        # 起点回到向导开头（登录前置页）—— 启动落点不按上次走到哪儿裁，也不因为
+        # "登录态是恢复出来的"就跳过它；上次选的会话由 resume() 在会话列表刷新
+        # 之后装回来（见 ResumeTests）。
+        self.assertEqual(restarted.wizard.step, WizardStep.LOGIN)
         # 订单数据仍在
         self.assertEqual(restarted.orders_for_display(), [])
-
-    def test_queued_receipts_survive_a_restart(self):
-        from wechat_ai_assistant.receipts import ReceiptOutbox, ReceiptRequest
-
-        app = self.make_app()
-        app.outbox.enqueue(ReceiptRequest(order_id="o1", order_version=1, conversation=self.group, text="好的，已记单"))
-        self.assertEqual(app.outbox.pending_count(), 1)
-        app.close()
-        self.apps.remove(app)
-
-        restarted = self.make_app()
-        self.assertEqual(restarted.outbox.pending_count(), 1, "重启后待发回执不能丢")
 
     def test_history_cursor_survives_a_restart(self):
         app = self.make_app(history_reader_fn=SimulatedHistory(default_count=2))
@@ -238,29 +236,6 @@ class CrashRecoveryTests(RecoveryHarness):
         self.assertIsNotNone(saved, "读取进度必须持久化")
         self.assertEqual(int(saved["exhausted"]), 1)
 
-    def test_receipt_lease_is_not_lost_across_a_crash(self):
-        from wechat_ai_assistant.agent import AgentStore
-        from wechat_ai_assistant.receipts import ReceiptOutbox, ReceiptRequest
-
-        app = self.make_app()
-        app.outbox.enqueue(ReceiptRequest(order_id="o1", order_version=1, conversation=self.group, text="好的，已记单"))
-        # 领取租约后"崩溃"
-        app.agent_store.claim_outbox_leases(limit=5, lease_seconds=0.01)
-        import time
-
-        time.sleep(0.05)
-        app.agent_store.close()
-        self.apps.remove(app)
-
-        reopened = AgentStore(str(self.dir / "agent.db"))
-        try:
-            self.assertEqual(reopened.recover_outbox(), 1)
-            self.assertEqual(reopened.pending_count(), 1, "崩溃后回执不能丢也不能卡住")
-        finally:
-            reopened.close()
-
-
-class TraceTests(RecoveryHarness):
     def test_every_run_is_traceable_end_to_end(self):
         message_id = self._message("苹果两箱", "t1")
         app = self.make_app()

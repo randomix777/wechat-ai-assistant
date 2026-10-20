@@ -1,7 +1,7 @@
 import sys
 from setuptools import find_packages, setup
 setup(name='wechat-ai-assistant',
-version='1.9.9',
+version='1.11.1',
 author='Hello-Mr-Crab',
 author_email='3083256475@qq.com',
 classifiers=[
@@ -17,7 +17,7 @@ packages=find_packages() if sys.maxsize==2**63-1 else ['pywechat'],
 license='LGPL',
 keywords=['rpa','windows','wechat','automation'],
 install_requires=[
-'emoji>=2.14.1','PyAutoGUI>=0.9.54','pycaw>=20240210','pywin32>=308','pywin32-ctypes>=0.2.2','pywinauto>=0.6.8','psutil>=5.9.5','pillow>=10.4.0','sounddevice>=0.5.1','soundfile>=0.13.1','packaging>=23.2']
+'emoji>=2.14.1','PyAutoGUI>=0.9.54','pycaw>=20240210','pywin32>=308','pywin32-ctypes>=0.2.2','pywinauto>=0.6.8','psutil>=5.9.5','pillow>=10.4.0','pywebview>=6.2; python_version >= "3.10"','sounddevice>=0.5.1','soundfile>=0.13.1','packaging>=23.2']
 )
 '''
 Author:Hello-Mr-Crab

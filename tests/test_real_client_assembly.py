@@ -119,7 +119,7 @@ class RealClientAssemblyTests(unittest.TestCase):
         )
 
     def tearDown(self):
-        for closer in (self.app.merger, self.app.cursor, self.app.agent_store):
+        for closer in (self.app.merger, self.app.cursor):
             try:
                 closer.close()
             except Exception:
@@ -131,7 +131,7 @@ class RealClientAssemblyTests(unittest.TestCase):
     def test_reading_history_works_before_any_cloud_login(self):
         """商户第一次用就是没登录的状态。这条路径必须能跑通。"""
         self.assertIsNone(self.app.pipeline, "前提：没有云端会话")
-        self.app.wizard.step = WizardStep.HISTORY
+        self.app.wizard.step = WizardStep.CONVERSATIONS
         self.app.wizard.choose_history_conversations(
             list(self.app.wizard.refresh_conversations())[:1]
         )
@@ -140,7 +140,7 @@ class RealClientAssemblyTests(unittest.TestCase):
         self.assertGreater(result.imported, 0, "读到了但没入库")
 
     def test_messages_really_land_in_the_local_database(self):
-        self.app.wizard.step = WizardStep.HISTORY
+        self.app.wizard.step = WizardStep.CONVERSATIONS
         self.app.wizard.choose_history_conversations(
             list(self.app.wizard.refresh_conversations())[:1]
         )
@@ -150,12 +150,30 @@ class RealClientAssemblyTests(unittest.TestCase):
         ).fetchone()["c"]
         self.assertGreater(count, 0, "本地订单库里没有消息")
 
+    def test_replacing_the_source_keeps_the_decrypted_database_hooked_up(self):
+        """换会话来源时必须重新接上解密库。
+
+        出过的事故：`build_application` 把 `conversation_source` 换成带 ui_lock
+        的新对象，而"注入 wcdb_fn"是在 `__init__` 里对旧对象做的 —— 换完就丢。
+        于是界面**永远**走内存扫描（只有群、名字不全、没有好友），而解密库明明
+        是好的。商户看到的就是"第一次刷新列表读的是内存而不是解密库"。
+        """
+        from wechat_ai_assistant.conversations import RealConversationSource
+
+        replacement = RealConversationSource(ui_lock=None)
+        self.app.replace_conversation_source(replacement)
+        self.assertIs(self.app.conversation_source, replacement)
+        self.assertIsNotNone(getattr(replacement, "wcdb_fn", None),
+                             "解密库没接上，界面会退回内存扫描")
+        self.assertIs(getattr(self.app.wizard, "conversation_source", None), replacement,
+                      "向导和应用的会话来源必须是同一个对象，否则来源标记和实际列举对不上")
+
     def test_the_wizard_and_the_app_share_one_store(self):
         """两处各开一个库会写出两份互不可见的数据。"""
         self.assertIs(self.app.wizard.orders(), self.store)
 
     def test_viewing_local_data_needs_no_login(self):
-        self.app.wizard.step = WizardStep.HISTORY
+        self.app.wizard.step = WizardStep.CONVERSATIONS
         self.app.wizard.choose_history_conversations(
             list(self.app.wizard.refresh_conversations())[:1]
         )

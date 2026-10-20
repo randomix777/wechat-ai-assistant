@@ -61,7 +61,7 @@ class DetachTests(unittest.TestCase):
         self.app.attach(session=Session(), client=self.client, parse_service=object())
 
     def tearDown(self):
-        for closer in (self.app.merger, self.app.cursor, self.app.agent_store):
+        for closer in (self.app.merger, self.app.cursor):
             try:
                 closer.close()
             except Exception:
@@ -93,6 +93,20 @@ class DetachTests(unittest.TestCase):
         self.assertIsNone(self.app.wizard.pipeline)
         self.assertFalse(self.app.backend_is_model,
                          "退出后不得继续把结果标成真实模型")
+
+    def test_detach_returns_to_the_login_page(self):
+        """退出登录必须回到登录前置页（真实报障）。
+
+        门禁判据是登录态，而退出是**唯一一次**让它由真变假的操作。以前只清
+        session/client/pipeline、不动 ``wizard.step``：停在首页或核对页点退出，
+        页面纹丝不动 —— 顶栏写着「未登录」，正文还是商户的经营数据。
+        """
+        from wechat_ai_assistant.wizard import WizardStep
+
+        self.app.wizard.step = WizardStep.DONE
+        self.app.detach()
+        self.assertEqual(self.app.wizard.step, WizardStep.LOGIN,
+                         "退出登录要回登录页，不能留在原来的流程里")
 
     def test_detach_deletes_the_local_credentials(self):
         """退出必须删本机凭证：不清文件，下次启动 restore 又登回去 ——
@@ -151,253 +165,20 @@ class LogoutWordingTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.source = (Path(__file__).resolve().parent.parent
-                      / "src" / "wechat_ai_assistant" / "merchant_ui.py").read_text(encoding="utf-8")
+        cls.page = (Path(__file__).resolve().parent.parent
+                    / "src" / "wechat_ai_assistant" / "web_wizard_page.py").read_text(
+                        encoding="utf-8")
 
     def test_logout_says_the_local_data_is_kept(self):
-        self.assertIn("都留在这台电脑上，没有删除", self.source)
+        body = self.page[self.page.index('if (action === "logout")'):]
+        body = body[:body.index("return;")]
+        self.assertIn("还在这台电脑上", body, "退出后要主动说清数据还在")
 
     def test_logout_says_he_does_not_need_to_read_again(self):
         """重读一遍会重复占用额度，也可能重复下单。"""
-        self.assertIn("不需要重新读取", self.source)
-        self.assertIn("不会重复计费", self.source)
-
-    def test_the_home_page_says_it_too(self):
-        """退出后商户可能先回首页，那里的额度行不能只写"未登录"。"""
-        self.assertIn("本地订单仍在，重新登录后可继续整理", self.source)
-
-    def test_it_keeps_him_on_the_page_where_his_data_is(self):
-        """不该被扔回第 1 步 —— 那等于逼他从头再走一遍。"""
-        start = self.source.index("def _on_logout_from_center")
-        block = self.source[start:start + 1400]
-        self.assertIn("WizardStep.ANALYZE if self.app.wizard.history_result",
-                      block)
-
-
-class WindowSessionTests(unittest.TestCase):
-    """窗口读会话必须读 ``app.session``。
-
-    ``MerchantWindow.session`` 是类属性 None，从来没被赋过值 —— 用它做判断
-    的代码等于永远走不到。
-    """
-
-    def test_the_window_never_assigns_its_own_session(self):
-        source = (Path(__file__).resolve().parent.parent / "src" / "wechat_ai_assistant" / "merchant_ui.py")
-        text = source.read_text(encoding="utf-8")
-        self.assertNotIn("self.session =", text,
-                         "窗口不该自己存一份会话，容易和应用层不同步")
-        self.assertNotIn("if self.session is not None",
-                         "会话判断必须走 app.session，这个分支永远为假")
-
-
-class AccountCenterDataTests(unittest.TestCase):
-    """账号中心显示的数据：名字、套餐、用量条、有效期，一个不能少。
-
-    用量条画的是**剩余**比例（和首页「分析额度剩余 X%」、``QuotaView
-    .remaining_percent`` 同一套语义，下拉里也写着"剩余 X%"）。只给百分比
-    不给具体数；数据只许来自缓存，方法里不许查网。
-    """
-
-    def _window(self, session, quota=None):
-        import types
-
-        from wechat_ai_assistant.merchant_ui import MerchantWindow
-
-        window = MerchantWindow.__new__(MerchantWindow)
-        window._widgets = {}
-        window.app = types.SimpleNamespace(
-            session=session,
-            wizard=types.SimpleNamespace(quota=quota))
-        return window
-
-    def test_percent_from_cached_quota(self):
-        import types
-
-        from wechat_ai_assistant.wizard import QuotaView
-
-        session = types.SimpleNamespace(
-            merchant_name="一号店",
-            subscription={"plan_code": "trial",
-                          "period_end": "2026-11-12T00:00:00"})
-        quota = QuotaView(logged_in=True, active=True, remaining=80,
-                          total_micro_usd=100, used_micro_usd=15,
-                          reserved_micro_usd=5)
-        data = self._window(session, quota)._account_center_data()
-        self.assertEqual(data["name"], "一号店")
-        self.assertEqual(data["plan"], "trial")
-        self.assertEqual(data["period_end"], "2026-11-12")
-        # 总量 100、已用 15、预留 5 ⇒ 剩 80%。
-        self.assertEqual(data["quota"], {"kind": "percent", "percent": 80})
-
-    def test_unlimited_has_no_bar(self):
-        import types
-
-        from wechat_ai_assistant.wizard import QuotaView
-
-        quota = QuotaView(logged_in=True, active=True, remaining=1,
-                          total_micro_usd=0)
-        data = self._window(types.SimpleNamespace(), quota)._account_center_data()
-        self.assertEqual(data["quota"]["kind"], "unlimited")
-
-    def test_subscription_fallback_when_no_quota(self):
-        session = {"merchant_name": "一号店",
-                   "subscription": {"quota_micro_usd": 200,
-                                    "used_micro_usd": 50,
-                                    "reserved_micro_usd": 0}}
-        import types
-        data = self._window(types.SimpleNamespace(**session))._account_center_data()
-        self.assertEqual(data["quota"], {"kind": "percent", "percent": 75})
-
-    def test_nothing_usable_is_unknown_not_zero(self):
-        import types
-
-        data = self._window(types.SimpleNamespace())._account_center_data()
-        self.assertEqual(data["name"], "当前账号")
-        self.assertEqual(data["quota"]["kind"], "unknown")
-
-    def test_jyi_quota_fields_drive_the_bar(self):
-        """JYI 给了配额字段就画条：总量/已用/预留都在 credential 里。"""
-        import types
-
-        session = types.SimpleNamespace(
-            merchant_name="JYI测试店", provider="jyi",
-            subscription={"quota_micro_usd": 200, "used_micro_usd": 50,
-                          "reserved_micro_usd": 0, "plan_code": "pro"})
-        data = self._window(session)._account_center_data()
-        self.assertEqual(data["quota"], {"kind": "percent", "percent": 75})
-        self.assertEqual(data["plan"], "pro")
-
-    def test_never_touches_the_network(self):
-        """下拉点开即看：在 UI 线程里等网络就是卡死（真实报障）。"""
-        import inspect
-
-        from wechat_ai_assistant import merchant_ui
-
-        source = inspect.getsource(merchant_ui.MerchantWindow._account_center_data)
-        self.assertNotIn("check_quota", source)
-
-
-class AccountDropdownTests(unittest.TestCase):
-    """下拉菜单：点的按钮必须真触发（FocusOut 不能先把菜单吃了）。
-
-    回归：充值点了没反应 —— 焦点离开菜单即销毁，按钮的点击还没送达。
-    """
-
-    def _window(self):
-        import tkinter as tk
-        import types
-        from tkinter import ttk
-
-        from wechat_ai_assistant.merchant_ui import MerchantWindow
-
-        root = tk.Tk()
-        root.withdraw()
-        self.addCleanup(root.destroy)
-        window = MerchantWindow.__new__(MerchantWindow)
-        window.root = root
-        window._widgets = {}
-        anchor = ttk.Button(root, text="x")
-        anchor.pack()
-        window._widgets["account"] = anchor
-        session = types.SimpleNamespace(
-            merchant_name="店", provider="jyi", subscription={})
-        window.app = types.SimpleNamespace(session=session)
-        root.update()
-        return window, root
-
-    def _buttons(self, root):
-        found = {}
-
-        def walk(widget):
-            for child in widget.winfo_children():
-                try:
-                    if child.winfo_class() == "TButton":
-                        found[str(child.cget("text"))] = child
-                except Exception:
-                    pass
-                walk(child)
-
-        walk(root)
-        return found
-
-    def test_recharge_click_opens_billing(self):
-        import unittest.mock
-
-        window, root = self._window()
-        window._show_account_center()
-        root.update()
-        buttons = self._buttons(root)
-        self.assertIn("充值", buttons)
-        with unittest.mock.patch("webbrowser.open", return_value=True) as opened:
-            buttons["充值"].invoke()
-            root.update()
-        opened.assert_called_once()
-        # 收银页先进 JYI 登录页再回账单页，回跳目标按 URL 规矩做了编码，
-        # 所以断言里先 unquote 再找 "/console/billing"。
-        from urllib.parse import unquote, urlsplit
-
-        url = opened.call_args.args[0]
-        self.assertEqual(urlsplit(url).path, "/signin", "没登录时先去登录页")
-        self.assertIn("/console/billing", unquote(url))
-
-    def test_recharge_fallback_when_browser_fails(self):
-        import unittest.mock
-
-        from wechat_ai_assistant import merchant_ui
-
-        window, root = self._window()
-        window._show_account_center()
-        root.update()
-        buttons = self._buttons(root)
-        with unittest.mock.patch("webbrowser.open", return_value=False), \
-            unittest.mock.patch.object(
-                merchant_ui.messagebox, "showinfo") as info:
-            buttons["充值"].invoke()
-            root.update()
-        info.assert_called_once()
-
-    def test_logout_click_asks_first(self):
-        import unittest.mock
-
-        window, root = self._window()
-        window._show_account_center()
-        root.update()
-        buttons = self._buttons(root)
-        self.assertIn("退出登录", buttons)
-        with unittest.mock.patch.object(
-                window.app, "detach", create=True,
-                side_effect=AssertionError("没确认就退出了")):
-            with unittest.mock.patch(
-                    "wechat_ai_assistant.merchant_ui.messagebox.askyesno",
-                    return_value=False):
-                buttons["退出登录"].invoke()
-                root.update()
-
-    def test_logout_confirm_completes(self):
-        """点了确认就退干净：先关下拉（确认框不能挂在它下面），
-        再问再退再刷，中间哪步炸了也不把退出本身丢掉。"""
-        import unittest.mock
-
-        window, root = self._window()
-        window._show_account_center()
-        root.update()
-        buttons = self._buttons(root)
-        calls = []
-        window.app.wizard = unittest.mock.Mock(history_result=None)
-        window.app.detach = lambda: calls.append("detach")
-        window._render_account = lambda: calls.append("render_account")
-        window._refresh_login_block = lambda: calls.append("refresh_login_block")
-        window._refresh_analyze_button = lambda: calls.append("refresh_analyze_button")
-        window._show_step = lambda step: calls.append(("show_step", step))
-        with unittest.mock.patch(
-                "wechat_ai_assistant.merchant_ui.messagebox.askyesno",
-                return_value=True), \
-            unittest.mock.patch(
-                "wechat_ai_assistant.merchant_ui.messagebox.showinfo"):
-            buttons["退出登录"].invoke()
-            root.update()
-        self.assertIn("detach", calls)
-        self.assertIn("render_account", calls)
+        body = self.page[self.page.index('if (action === "logout")'):]
+        body = body[:body.index("return;")]
+        self.assertIn("不需要重新读取", body)
 
 
 if __name__ == "__main__":

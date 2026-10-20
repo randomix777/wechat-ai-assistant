@@ -1,7 +1,13 @@
 """真实微信历史读取验收（单群、最小侵入）。
 
-走的是生产同一条路径：``HistoryReader`` + ``Messages.dump_chat_history``，
-不是测试专用的模拟后端。会把微信窗口拉到前台、滚动读取，然后复原。
+**这不是生产路径。** 生产只有解密库直读一条路（见
+``history_read.SENDER_SOURCES``，要先提取密钥）。这里故意注入
+``Messages.dump_chat_history``（界面链读取器），在真机上单独验收"翻窗口能不能
+读到消息、字段对不对" —— 那条界面链已经不接进产品，但底层读取器还在。
+注入读取器 = ``members`` 语义，所以必须显式写 ``sender_source="members"``，
+否则按生产默认走解密库、这个脚本就白跑了。
+
+会把微信窗口拉到前台、滚动读取，然后复原。
 """
 from __future__ import annotations
 
@@ -38,7 +44,8 @@ def main() -> int:
     print(f"　时间范围：{window.describe()}　请求条数：{COUNT}")
     print("　（下面会短暂操作微信窗口）")
 
-    reader = HistoryReader(reader=Messages.dump_chat_history, ui_lock=None)
+    reader = HistoryReader(reader=Messages.dump_chat_history, ui_lock=None,
+                           sender_source="members")
     result = reader.read([conversation], window, merchant_id="real-verify", max_messages=COUNT, resume=False)
 
     print("③ 实际覆盖")

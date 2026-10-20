@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 from wechat_ai_assistant import paths
-from wechat_ai_assistant.ui_theme import set_window_icon
+from wechat_ai_assistant.app_icon import set_window_icon
 
 ROOT = Path(__file__).resolve().parents[1]
 ICO = ROOT / "deploy" / "assets" / "app.ico"
@@ -72,6 +72,64 @@ class WindowIconTests(unittest.TestCase):
     def test_a_missing_asset_is_not_an_error(self):
         with mock.patch.object(paths, "asset_path", lambda name: None):
             set_window_icon(self._StubbornWindow())
+
+
+class NativeWindowIconTests(unittest.TestCase):
+    """Web 应用窗口是**别人的窗口**（Edge --app / pywebview）。
+
+    所以图标得用 Win32 的 ``WM_SETICON`` + 类图标挂上去 —— 不挂的话任务栏和
+    标题栏显示的是 Edge 的图标，看起来不像我们的软件。这里不点真窗口，只验
+    调用形状与失败时的静默。
+    """
+
+    def _fake_user32(self, calls: dict):
+        class _Fake:
+            def LoadImageW(self, _inst, path, _type, cx, cy, _flags):
+                calls.setdefault("loads", []).append((str(path), cx, cy))
+                return 1000 + cx  # 非 0 = 加载成功
+
+            def SendMessageW(self, hwnd, message, wparam, lparam):
+                calls.setdefault("sent", []).append((hwnd, message, wparam, lparam))
+                return 0
+
+            def SetClassLongPtrW(self, hwnd, index, value):
+                calls.setdefault("class", []).append((hwnd, index, value))
+                return 0
+
+        return _Fake()
+
+    def test_it_sets_both_icon_sizes_and_the_class_icon(self):
+        from wechat_ai_assistant import app_icon
+
+        calls: dict = {}
+        with mock.patch.object(app_icon, "_native", lambda: self._fake_user32(calls)):
+            self.assertTrue(app_icon.apply_native_icon(4242))
+
+        sizes = {cx for _path, cx, _cy in calls["loads"]}
+        self.assertEqual(sizes, {32, 16}, "大图标给标题栏/任务栏，小图标给标题栏左上角")
+        self.assertEqual(len(calls["sent"]), 2, "两个尺寸各一次 WM_SETICON")
+        self.assertEqual([item[2] for item in calls["sent"]], [1, 0], "先大后小：ICON_BIG=1, ICON_SMALL=0")
+        self.assertEqual(len(calls["class"]), 1, "类图标不设，任务栏那格还是 Edge 的")
+
+    def test_a_missing_icon_is_not_an_error(self):
+        from wechat_ai_assistant import app_icon
+
+        with mock.patch.object(app_icon, "icon_path", lambda: None):
+            self.assertFalse(app_icon.apply_native_icon(4242))
+
+    def test_no_window_means_no_work(self):
+        from wechat_ai_assistant import app_icon
+
+        self.assertFalse(app_icon.apply_native_icon(0))
+        self.assertEqual(app_icon.find_window_by_pid(0), 0)
+        self.assertEqual(app_icon.find_window_by_title(""), 0)
+
+    def test_scheduling_gives_up_quietly(self):
+        """窗口一直不出现（Edge 崩了/被关了）也不能一直转。"""
+        from wechat_ai_assistant import app_icon
+
+        with mock.patch.object(app_icon, "find_window_by_pid", lambda pid: 0):
+            self.assertFalse(app_icon.schedule_icon(pid=123, timeout=0.3))
 
 
 if __name__ == "__main__":

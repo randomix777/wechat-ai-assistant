@@ -54,6 +54,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 from typing import Any, Callable, Mapping
+from urllib.parse import quote, urlencode, urlsplit
 
 from . import update_signature as signing
 
@@ -77,6 +78,9 @@ ASSET_PREFIX = "微信AI智能助理-win64-"
 PENDING_NAME = "pending.json"
 UPDATES_DIR_NAME = "_updates"
 BACKUP_PREFIX = "_backup-"
+#: 换版失败记号的文件名前缀（``blocked-<版本>.txt``）。换版脚本按它写，
+#: :func:`blocked_versions` 按它读 —— 两处必须同一个。
+BLOCKED_PREFIX = "blocked-"
 
 HTTP_TIMEOUT = 15.0
 DOWNLOAD_TIMEOUT = 300.0
@@ -127,17 +131,22 @@ def is_frozen_app() -> bool:
     return bool(getattr(sys, "frozen", False))
 
 
-def _http_get_json(url: str) -> Any:
-    request = urllib.request.Request(url, headers={
+def _http_get_json(url: str, headers: Mapping[str, str] | None = None) -> Any:
+    request_headers = {
         "Accept": "application/vnd.github+json",
         "User-Agent": "wechat-ai-assistant-updater/1",
-    })
+    }
+    request_headers.update(headers or {})
+    request = urllib.request.Request(url, headers=request_headers)
     with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:
         return json.loads(response.read(4 * 1024 * 1024).decode("utf-8"))
 
 
-def _http_get_bytes(url: str, timeout: float = HTTP_TIMEOUT) -> bytes:
-    request = urllib.request.Request(url, headers={"User-Agent": "wechat-ai-assistant-updater/1"})
+def _http_get_bytes(url: str, timeout: float = HTTP_TIMEOUT,
+                    headers: Mapping[str, str] | None = None) -> bytes:
+    request_headers = {"User-Agent": "wechat-ai-assistant-updater/1"}
+    request_headers.update(headers or {})
+    request = urllib.request.Request(url, headers=request_headers)
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return response.read(1024 * 1024 * 1024 + 1)
 
@@ -195,17 +204,17 @@ def _windows_asset(assets: Any) -> Mapping[str, Any] | None:
 
 
 def _check_jyi(current: str) -> dict[str, Any] | None:
-    """从 JYI 工具中心读签名清单查新版。拿不到/验不过就返回 None（调用方转 GitHub）。
+    """读工具中心的**公开详情**，从签名清单里拿这一版该装什么。
 
-    清单和签名都从工具中心下来，但**签名是私钥签的**：包放在哪个服务器上都不影响
-    "这版是不是我们自己发的"。所以这里验签不过就当没有新版，绝不因为"是本家的域名"
-    就放宽。清单里的哈希才是准的，工具中心报的版本号/哈希只当线索。
+    公开详情不带凭据（``GET /api/tools/<slug>?lang=zh``）：它给的是"这一版有什么"，
+    而**判据始终是清单的签名** —— 工具中心报的版本号、哈希只当线索，清单被改过
+    一律当没有新版。下载才需要授权，那枚短效 Bearer 由
+    :func:`download_and_stage` 挂在工具中心的下载地址上。
     """
     base, slug = tools_base(), tool_slug()
     if not base or not slug:
         return None
-    from urllib.parse import quote
-    url = f"{base}/api/tools/{quote(slug, safe='')}?lang=zh"
+    url = f"{base}/api/tools/{quote(slug, safe='')}?{urlencode({'lang': 'zh'})}"
     try:
         payload = _http_get_json(url)
     except Exception as exc:
@@ -213,11 +222,19 @@ def _check_jyi(current: str) -> dict[str, Any] | None:
         return None
     tool = payload.get("tool") if isinstance(payload, Mapping) else None
     if not isinstance(tool, Mapping):
+        LOGGER.debug("工具中心没给工具详情，改问 GitHub")
         return None
+    # 后台把这一版的下载暂停了：**连 GitHub 都不问** —— 同一版换个地方下回来，
+    # 下架就白下了（发布的人正是要它别再出去）。
     if tool.get("downloadsPaused"):
-        raise _DownloadPaused(str(tool.get("version") or ""))
+        raise _DownloadPaused(current)
+    status = str(tool.get("status") or "").strip().lower()
+    if status and status != "published":
+        LOGGER.info("工具中心这一版状态是 %s，这次不更新", status)
+        return None
     asset = _windows_asset(tool.get("assets"))
-    if asset is None:
+    if not isinstance(asset, Mapping):
+        LOGGER.debug("工具中心没有 Windows 的包，改问 GitHub")
         return None
     manifest = asset.get("signedManifest")
     signature = asset.get("signature")
@@ -225,24 +242,40 @@ def _check_jyi(current: str) -> dict[str, Any] | None:
         LOGGER.debug("工具中心里这版还没带签名清单，改问 GitHub")
         return None
     if not signing.verify_manifest(str(manifest), str(signature)):
-        LOGGER.warning("工具中心的签名清单没验过，当没有新版")
+        LOGGER.warning("工具中心的签名清单没验过，改问 GitHub 要真清单")
         return None
     parsed = signing.parse_manifest(str(manifest).encode("utf-8"))
     if not parsed:
         LOGGER.warning("工具中心的签名清单读不懂，当没有新版")
         return None
-    version = str(parsed.get("version") or "")
+    version = str(parsed.get("version") or "").lstrip("vV")
     if not is_newer(version, current):
         return None
-    notes = str(parsed.get("notes") or "") or str(tool.get("releaseNotes") or "")
+    download_url = str(parsed.get("zip_url") or "").strip()
+    if not _is_tools_center_url(download_url, base):
+        LOGGER.warning("JYI 签名清单的下载地址不属于工具中心，拒绝使用授权凭据")
+        return None
     return {
         "version": version,
-        "notes": notes,
-        "zip_url": str(parsed.get("zip_url") or ""),
+        # 清单里没写更新说明就用工具中心页面上那句 —— 两边都空就没有说明。
+        "notes": str(parsed.get("notes") or "") or str(tool.get("releaseNotes") or ""),
+        "zip_url": download_url,
         "sha256": str(parsed.get("sha256") or ""),
         # 清单里说的地址万一挂了，GitHub 上同一版还能兜一下。
         "alt_urls": [_github_asset_url(version)],
     }
+
+
+def _is_tools_center_url(url: str, base: str | None = None) -> bool:
+    """Only attach the short-lived Tool Center bearer to the expected HTTPS origin."""
+    try:
+        candidate = urlsplit(url)
+        expected = urlsplit(base or tools_base())
+        return (candidate.scheme == "https" and not candidate.username and not candidate.password
+                and expected.scheme == "https" and candidate.hostname == expected.hostname
+                and candidate.port == expected.port and candidate.path.startswith("/api/tools/"))
+    except ValueError:
+        return False
 
 
 def _github_asset_url(version: str) -> str:
@@ -271,7 +304,9 @@ def check_for_update(repo: str = DEFAULT_REPO, current: str = "") -> dict[str, A
     """查最新版。有新版返回 ``{version, notes, zip_url, sha256, alt_urls}``，
     没有/查不到/任何异常都返回 None（调用方直接跳过）。
 
-    先问 JYI 工具中心，再问 GitHub。两条路的清单都**只认签名**：清单里写着这一版
+    先问 JYI 工具中心，再问 GitHub。**检查不需要凭据**（读的是公开详情），
+    只有**下载**那一枚短效 Bearer 要用在工具中心的下载地址上 ——
+    见 :func:`download_and_stage`。两条路的清单都**只认签名**：清单里写着这一版
     该装哪个包、哈希是多少，包地址只是个下载入口。清单缺失或验不过，钉了公钥
     的客户端一律当作"没有新版" —— 宁可停在旧版，也不装一个来路不明的包。
     """
@@ -297,6 +332,33 @@ def check_for_update(repo: str = DEFAULT_REPO, current: str = "") -> dict[str, A
 def blocked_marker(version: str, base: Path | None = None) -> Path:
     """换版失败留下的记号文件路径（`blocked-<版本>.txt`）。"""
     return (base or app_dir()) / f"blocked-{str(version).lstrip('vV')}.txt"
+
+
+def blocked_versions(base: Path | None = None) -> list[str]:
+    """被跳过的版本号（安装目录里的 ``blocked-<版本>.txt``），按版本从小到大。"""
+    directory = base or app_dir()
+    found: list[str] = []
+    try:
+        for path in directory.glob(f"{BLOCKED_PREFIX}*.txt"):
+            version = path.stem[len(BLOCKED_PREFIX):].strip()
+            if version:
+                found.append(version)
+    except OSError:
+        return []
+    return sorted(found, key=parse_version)
+
+
+def failed_update_note(base: Path | None = None) -> str:
+    """上次换版没成时给商户看的一句话；没这回事就返回空串。
+
+    换版失败以前只写 ``%TEMP%`` 的运行日志和安装目录里的记号，界面上一个字都没有
+    —— 商户看到的是"怎么一直没更新"，客服也问不出所以然。
+    """
+    versions = blocked_versions(base)
+    if not versions:
+        return ""
+    return (f"上次更新到 v{versions[-1]} 没装成，已跳过这一版；"
+            "下一版出来会自动再试")
 
 
 def version_is_blocked(version: str, base: Path | None = None) -> bool:
@@ -401,8 +463,24 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _scratch(name: str) -> Path:
+    """中间文件目录：跟着数据目录走（见 ``paths.scratch_dir``）。"""
+    try:
+        from .paths import scratch_dir
+
+        return scratch_dir(name)
+    except Exception:
+        fallback = Path(tempfile.gettempdir()) / "pyw" / name
+        try:
+            fallback.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        return fallback
+
+
 def download_and_stage(info: Mapping[str, Any], base: Path | None = None,
-                       on_progress: Callable[[int, int], None] | None = None) -> Path | None:
+                       on_progress: Callable[[int, int], None] | None = None,
+                       tool_access_token: str = "") -> Path | None:
     """下载 → 校验 → 解压到版本目录。成功返回版本目录，失败返回 None。
 
     校验不过/解压失败一律删干净，不留半截文件让下次启动误用。
@@ -415,13 +493,22 @@ def download_and_stage(info: Mapping[str, Any], base: Path | None = None,
     if not version or not urls or not parse_version(version):
         return None
     staged = base / UPDATES_DIR_NAME / version
-    tmp_dir = Path(tempfile.mkdtemp(prefix="pyw-dl-"))
+    # 中间文件放在**数据目录**下的 tmp（免安装版就在 data\tmp，不往 C 盘撒）。
+    # 用 mkdtemp 在它下面再开一个唯一目录：两次更新同时跑时不打架。
+    tmp_dir = Path(tempfile.mkdtemp(prefix="dl-", dir=str(_scratch("updater"))))
     try:
         zip_path = tmp_dir / "app.zip"
         data = b""
         for url in urls:
             try:
-                data = _http_get_bytes(url, DOWNLOAD_TIMEOUT)
+                # 只有**工具中心的下载地址**才挂那枚短效 Bearer（授权审批）；别的
+                # 地址（GitHub 兜底）不带任何凭据。没有凭据时连参数都不传。
+                if tool_access_token and _is_tools_center_url(url):
+                    data = _http_get_bytes(
+                        url, DOWNLOAD_TIMEOUT,
+                        headers={"Authorization": f"Bearer {tool_access_token}"})
+                else:
+                    data = _http_get_bytes(url, DOWNLOAD_TIMEOUT)
                 break
             except Exception as exc:
                 LOGGER.debug("下载更新失败（%s）：%s", url, exc)
@@ -710,10 +797,16 @@ def apply_pending_update(base: Path | None = None) -> bool:
 
 
 def check_in_background(on_staged: Callable[[Mapping[str, Any]], None] | None = None,
-                        repo: str = DEFAULT_REPO) -> threading.Thread:
+                        repo: str = DEFAULT_REPO, jyi_client: Any = None,
+                        on_failed: Callable[[Mapping[str, Any], str], None] | None = None,
+                        ) -> threading.Thread:
     """起后台线程查更新、下包、暂存。任何异常都吞掉，只记日志。
 
     只在打包形态下跑；开发模式调了也是空转（apply 那边同样只认打包形态）。
+
+    ``on_failed(info, hint)``：**查到新版但没下下来**时回调。以前这种情况只有
+    一行日志，界面一声不吭 —— 商户看到的是"怎么一直不更新"，客服也问不出所以然。
+    ``hint`` 是一句能采取行动的话（最常见的是"还没登录，登录后才能从工具中心下载"）。
     """
 
     def work() -> None:
@@ -722,11 +815,32 @@ def check_in_background(on_staged: Callable[[Mapping[str, Any]], None] | None = 
                 return
             # 必须带上本机版本：不传就是拿空串比，任何 release 都"更新"，界面一启动
             # 就去下自己已经在跑的这版，白耗流量还多一次换版。
+            # 凭据只留给**下载**：查新版读的是公开详情，不带任何凭据。
             info = check_for_update(repo, current=current_version())
             if info is None:
                 return
-            staged = download_and_stage(info)
+            tool_access_token = ""
+            token_error = ""
+            get_tool_access = getattr(jyi_client, "tool_access_token", None)
+            if callable(get_tool_access):
+                try:
+                    tool_access_token = str(get_tool_access() or "")
+                except Exception as exc:
+                    token_error = str(exc)
+                    LOGGER.debug("获取 JYI 工具中心下载凭据失败：%s", exc)
+            staged = download_and_stage(info, tool_access_token=tool_access_token)
             if staged is None:
+                # 查到了新版却没下成：说清楚"卡在哪一步"，别让商户对着旧界面猜。
+                hint = ("还没登录产品账号，登录后才能从工具中心下载"
+                        if not tool_access_token
+                        else "下载或校验没通过，稍后会自动再试")
+                LOGGER.warning("新版本 %s 没下下来：%s（凭据错误：%s）",
+                               info.get("version"), hint, token_error or "无")
+                if on_failed is not None:
+                    try:
+                        on_failed(info, hint)
+                    except Exception:
+                        pass
                 return
             LOGGER.info("新版本 %s 已暂存，下次启动生效", info.get("version"))
             if on_staged is not None:
@@ -745,15 +859,18 @@ def check_in_background(on_staged: Callable[[Mapping[str, Any]], None] | None = 
 __all__ = [
     "API_LATEST",
     "ASSET_PREFIX",
+    "BLOCKED_PREFIX",
     "DEFAULT_REPO",
     "UPDATES_DIR_NAME",
     "apply_pending_update",
     "app_dir",
+    "blocked_versions",
     "build_updater_script",
     "check_for_update",
     "check_in_background",
     "current_version",
     "download_and_stage",
+    "failed_update_note",
     "is_frozen_app",
     "is_newer",
     "parse_version",

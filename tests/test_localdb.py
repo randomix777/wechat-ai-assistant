@@ -246,7 +246,14 @@ class VoteNameTests(unittest.TestCase):
         self.assertIn("重新提取密钥", str(ctx.exception), "解不出 wxid 要给可执行的下一步")
         self.assertEqual(dump_calls, [], "界面链已移除，不许再回落开窗读取")
 
-    def test_history_reader_localdb_adapts_records(self):
+    def test_localdb_source_is_retired_and_reads_the_decrypted_db(self):
+        """显式传 localdb 也不再扫进程内存 —— 内存 carve 已退役，按解密库走。
+
+        反转记录：这条原来断言"localdb 来源把内存里捡到的记录适配成消息行"
+        （发送人解备注名、来源标 localdb、稳定 id 由群+内容+时间算）。
+        内存 carve 要对每个会话扫描微信进程的大块地址空间、读取延迟不可预测，
+        现在只留解密库一条路；旧名字还认，但不再碰进程内存。
+        """
         from unittest.mock import patch
 
         from wechat_ai_assistant.conversations import Conversation, ConversationKind
@@ -254,17 +261,17 @@ class VoteNameTests(unittest.TestCase):
 
         group = Conversation(name="水果群", kind=ConversationKind.GROUP)
         reader = HistoryReader(lambda **kw: [], sender_source="localdb")
+        self.assertEqual(reader._sender_source, "wcdb", "退役旧名按解密库走")
         message = localdb.LocalMessage(
             group_wxid="6255144087@chatroom", sender_wxid="wxid_abc",
             content="两箱苹果", timestamp=1791828020)
         with patch.object(localdb, "resolve_group_wxid", return_value="6255144087@chatroom"), \
-             patch.object(localdb, "read_conversation", return_value=[message]), \
+             patch.object(localdb, "read_conversation", return_value=[message]) as read, \
              patch.object(localdb, "resolve_contact_name", return_value="张老板"):
-            got = reader._read_one(group, 10)
-        self.assertEqual(len(got), 1)
-        self.assertEqual(got[0]["消息发送人"], "张老板")
-        self.assertEqual(got[0]["消息内容"], "两箱苹果")
-        self.assertRegex(got[0]["消息发送时间"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
+            with self.assertRaises(RuntimeError) as ctx:
+                reader._read_one(group, 10)
+        self.assertIn("重新提取密钥", str(ctx.exception), "解不出就要给可执行的下一步")
+        self.assertEqual(read.call_count, 0, "不许再扫进程内存")
 
     def test_read_passes_sender_source_per_call(self):
         from unittest.mock import patch
@@ -288,32 +295,19 @@ class VoteNameTests(unittest.TestCase):
                         mode="recent", sender_source="localdb")
         self.assertEqual(seen.get("source"), "localdb")
 
-    def test_stable_source_id_ignores_sender(self):
-        """同一条重读，发送人变了 id 也不变 —— 否则名字一升级就多一条。"""
-        from wechat_ai_assistant.history_read import HistoryReader
+    def test_stable_source_id_contract_moved_to_the_decrypted_db(self):
+        """"同一条重读、发送人变了 id 也不变"这条契约跟着内存路一起搬走。
 
-        ids = []
+        反转记录：这里原来用 localdb 的合成记录钉它（``source_id`` 由
+        群+内容+时间算）。内存路退役后，id 由**解密库**按（服务端 id，或
+        本地 id + 时间）算，发送人只影响发送人一列 —— 新的断言长在
+        ``test_wcdb.py::test_stable_source_id_survives_a_sender_rename``，
+        那是现在唯一真有的那条路。
+        """
+        from wechat_ai_assistant import wcdb
 
-        def dump(**kwargs):
-            return []
-
-        reader = HistoryReader(dump, sender_source="localdb")
-        base = dict(group_wxid="g@chatroom", content="两箱苹果", timestamp=1791828020)
-        for sender in ("wxid_abc", "张老板"):
-            message = localdb.LocalMessage(sender_wxid=sender, **base)
-            with unittest.mock.patch.object(
-                    localdb, "resolve_group_wxid", return_value="g@chatroom"), \
-                 unittest.mock.patch.object(
-                    localdb, "read_conversation", return_value=[message]), \
-                 unittest.mock.patch.object(
-                    localdb, "resolve_contact_name", return_value=sender):
-                from wechat_ai_assistant.conversations import Conversation, ConversationKind
-                got = reader._read_one(
-                    Conversation(name="群", kind=ConversationKind.GROUP), 10)
-            ids.append(got[0]["source_id"])
-            self.assertTrue(got[0]["source_id"].startswith("localdb-"))
-            self.assertTrue(got[0]["stable_source_id"])
-        self.assertEqual(ids[0], ids[1])
+        self.assertTrue(callable(getattr(wcdb, "read_messages", None)),
+                        "解密库读取还在，契约就有地方可钉")
 
 
 class SenderUpgradeTests(unittest.TestCase):

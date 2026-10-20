@@ -21,17 +21,24 @@ import_legacy_environment()
 #: （按字母序第一个踩到的模块污染后面所有模块），单跑那个模块却是绿的。
 ensure_packages_on_path()
 
+#: 顶层仍然按需导出历史 API，但**只导出读得到的那一套**。
+#:
+#: 原来这里还有一整排指向 ``.WeChatAuto`` 的名字（``Messages`` / ``Monitor`` /
+#: ``AutoReply`` …）。那套模块带的是点"发送"按钮、自动加好友、自动回复 ——
+#: 产品一样都不用（``runmode`` 写着只读不写），但它**在源码树里**，只要有人
+#: ``from wechat_ai_assistant import Messages`` 一下，PyInstaller 就会把它收进
+#: 制品。于是"这个工具不会替我给别人发微信"就从**事实**退回成**承诺**。
+#:
+#: 所以这里不再导出它们。读消息走本机解密库（``localdb`` / ``wcdb``），导航走
+#: ``.WeChatTools``，都不需要那一套。
 _EXPORTS = {
-    "AutoReply": ".WeChatAuto", "Collections": ".WeChatAuto", "Call": ".WeChatAuto",
-    "Contacts": ".WeChatAuto", "Files": ".WeChatAuto", "FriendSettings": ".WeChatAuto",
-    "Messages": ".WeChatAuto", "Moments": ".WeChatAuto", "Monitor": ".WeChatAuto",
-    "Settings": ".WeChatAuto", "Tools": ".WeChatTools", "Navigator": ".WeChatTools",
+    "Tools": ".WeChatTools", "Navigator": ".WeChatTools",
     "SystemSettings": ".WinSettings", "GlobalConfig": ".Config",
     "MessageDirection": ".reliability", "MessageEvent": ".reliability",
     "MessageKind": ".reliability", "MessageLedger": ".reliability",
     "OperationQueueClosed": ".reliability", "OperationQueueFull": ".reliability",
     "UiOperationQueue": ".reliability", "retry_call": ".reliability",
-    "AgentCommand": ".agent", "AgentConfig": ".agent", "AgentStore": ".agent",
+    "AgentConfig": ".agent", "AgentStore": ".agent",
     "LocalAgent": ".agent", "CloudClient": ".cloud", "CloudError": ".cloud",
     "CloudResponse": ".cloud", "CloudRequestHandler": ".cloud_server",
     "CloudStore": ".cloud_server", "create_server": ".cloud_server",

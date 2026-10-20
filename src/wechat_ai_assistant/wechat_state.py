@@ -78,7 +78,7 @@ def uia_automation_available(version: str = "") -> bool:
 
     4.1.15 起主窗口自绘，UIA 树里只有 2 个黑盒 Pane —— 查找、遍历、
     点击、头像，过去那套全死。探一次记住，同版本不再重复扫。
-    探不到窗口一律按死的算：宁可保守地走内存路，也不让用户干等。
+    探不到窗口一律按死的算：宁可保守，也不让用户干等。
     """
     key = str(version or "")
     if key in _UIA_CACHE:
@@ -141,12 +141,12 @@ def _count_nodes(element, seen: set, depth: int, limit: int = 12) -> int:
 
 
 def default_sender_source() -> str:
-    """认人方式默认值：永远 "localdb"（内存 carve，不碰窗口）。
+    """认人方式默认值：永远 "wcdb"（解密本地库直读，要先提取密钥）。
 
-    界面链已移除，UIA 探针的结果不再决定走哪条路（探针本身是只读
-    扫描，留着给登录检测和单测用）。有钥匙时读取层会自动升级 wcdb。
+    界面链和内存 carve 都已退役 —— UIA 探针的结果不再决定走哪条路
+    （探针本身是只读扫描，留着给登录检测和单测用）。
     """
-    return "localdb"
+    return "wcdb"
 
 
 class WeChatState:
@@ -596,8 +596,13 @@ class WeChatMonitor:
         with self._lock:
             return self._thread is not None and self._thread.is_alive()
 
-    def check_once(self) -> WeChatStatus:
+    def check_once(self, *, notify: bool = True) -> WeChatStatus:
         """同步检测一次，立即返回。任何时候都可以安全调用。
+
+        ``notify=False`` 给**只读探测**用（首页为了显示真实状态而探一次）：
+        状态照常更新，但不触发 ``on_change``。读一次状态不该改流程 ——
+        监视器的回调会把向导往前推，于是"刷一下首页"就能把商户从正在走的
+        那一步（比如启动落点的登录页）拽走。
 
         **读取历史期间这一轮直接跳过。** 探测本身要驱动微信窗口，和读历史
         共用同一个窗口 —— 两个线程同时动它，行为不可预测。
@@ -620,7 +625,7 @@ class WeChatMonitor:
             status = WeChatStatus(WeChatState.UNREADABLE, f"检测微信状态时出错：{exc}", checked_at=time.time())
         previous = self.latest.state
         self.latest = status
-        if self.on_change and status.state != previous:
+        if notify and self.on_change and status.state != previous:
             try:
                 self.on_change(status)
             except Exception:

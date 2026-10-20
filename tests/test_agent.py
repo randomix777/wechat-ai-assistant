@@ -12,7 +12,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 from wechat_ai_assistant.utils import UNRESOLVED_SENDER
 
-from wechat_ai_assistant.agent import AgentCommand, AgentConfig, AgentStore, LocalAgent
+from wechat_ai_assistant.agent import AgentConfig, AgentStore, LocalAgent
 from wechat_ai_assistant.Errors import NoSuchFriendError
 from wechat_ai_assistant.cloud import CloudClient, CloudError
 from wechat_ai_assistant.cloud_server import _load_agent_tokens, create_server
@@ -127,34 +127,6 @@ class AgentTests(unittest.TestCase):
             agent.close()
             store.close()
 
-    def test_local_agent_ignores_malformed_command_without_id(self):
-        class Cloud:
-            def __init__(self):
-                self.acks = []
-
-            def fetch_commands(self):
-                return [{"action": "noop", "target": "chat"}]
-
-            def acknowledge(self, command_id, result):
-                self.acks.append((command_id, result))
-
-            def send_events(self, events):
-                return None
-
-            def heartbeat(self, health):
-                return None
-
-        with tempfile.TemporaryDirectory() as directory:
-            store = AgentStore(Path(directory) / "agent.db")
-            cloud = Cloud()
-            config = AgentConfig(group="chat", db_path=str(Path(directory) / "agent.db"), history_limit=0, listen_duration="0s")
-            agent = LocalAgent(config, store=store, cloud=cloud)
-            summary = agent.run_once()
-            self.assertEqual(summary["health"]["state"], "idle")
-            self.assertEqual(cloud.acks, [])
-            agent.close()
-            store.close()
-
     def test_history_bootstrap_keeps_identical_rows_and_runs_once(self):
         calls = []
         item = {"消息发送人": "a", "消息内容": "收到", "消息类型": "文本", "消息发送时间": "12:30"}
@@ -205,115 +177,6 @@ class AgentTests(unittest.TestCase):
             self.assertEqual(cloud.business_calls,2)
             self.assertEqual(resumed.pending_business_upload_count(),0)
             agent.close();resumed.close()
-
-    def test_local_agent_does_not_send_after_stop_requested(self):
-        sent = []
-        with tempfile.TemporaryDirectory() as directory:
-            store = AgentStore(Path(directory) / "agent.db")
-            store.enqueue(AgentCommand("c-stop", "send_text", "chat", {"text": "no"}))
-            config = AgentConfig(group="chat", db_path=str(Path(directory) / "agent.db"), history_limit=0, listen_duration="0s")
-            agent = LocalAgent(config, store=store, sender=lambda friend, messages: sent.append((friend, messages)))
-            stop_event = threading.Event()
-            stop_event.set()
-            summary = agent.run_once(stop_event=stop_event)
-            self.assertEqual(summary["processed_commands"], 0)
-            self.assertEqual(sent, [])
-            agent.close()
-            store.close()
-
-    def test_store_deduplicates_events_and_persists_commands(self):
-        with tempfile.TemporaryDirectory() as directory:
-            store = AgentStore(Path(directory) / "agent.db")
-            event = MessageEvent("chat", "hello", stable_id="m-1")
-            self.assertTrue(store.record_event(event))
-            self.assertFalse(store.record_event(event))
-            command = AgentCommand("c-1", "send_text", "chat", {"text": "ok"})
-            self.assertTrue(store.enqueue(command))
-            self.assertFalse(store.enqueue(command))
-            claimed = store.claim_outbox_leases()
-            self.assertEqual([item.command.command_id for item in claimed], ["c-1"])
-            store.complete("c-1", claimed[0].token)
-            self.assertEqual(store.pending_count(), 0)
-            self.assertEqual(store.event_count(), 1)
-            store.close()
-
-    def test_store_does_not_complete_with_stale_lease_token(self):
-        with tempfile.TemporaryDirectory() as directory:
-            store = AgentStore(Path(directory) / "agent.db")
-            store.enqueue(AgentCommand("c-stale", "noop", "chat"))
-            lease = store.claim_outbox_leases()[0]
-            self.assertFalse(store.complete("c-stale"))
-            self.assertFalse(store.complete("c-stale", "wrong-token"))
-            self.assertTrue(store.complete("c-stale", lease.token))
-            self.assertEqual(store.get_command("c-stale")["status"], "succeeded")
-            store.close()
-
-    def test_store_recovers_null_command_lease(self):
-        with tempfile.TemporaryDirectory() as directory:
-            store = AgentStore(Path(directory) / "agent.db")
-            store.enqueue(AgentCommand("c-null", "noop", "chat"))
-            store.claim_outbox_leases(lease_seconds=300)
-            with store._lock, store._connection:
-                store._connection.execute("UPDATE outbox SET lease_until = NULL WHERE command_id = 'c-null'")
-            self.assertEqual(store.recover_outbox(), 1)
-            self.assertEqual(store.get_command("c-null")["status"], "queued")
-            store.close()
-
-    def test_store_recovers_expired_command_lease(self):
-        with tempfile.TemporaryDirectory() as directory:
-            now = [100.0]
-            store = AgentStore(Path(directory) / "agent.db", clock=lambda: now[0])
-            store.enqueue(AgentCommand("c-lease", "noop", "chat"))
-            self.assertEqual(len(store.claim_outbox(lease_seconds=10)), 1)
-            now[0] = 111.0
-            self.assertEqual(store.recover_outbox(), 1)
-            self.assertEqual(len(store.claim_outbox(lease_seconds=10)), 1)
-            store.close()
-
-    def test_local_agent_bootstraps_and_processes_outbox(self):
-        sent = []
-        dialog_closed = []
-
-        class Dialog:
-            def close(self):
-                dialog_closed.append(True)
-
-        def history_reader(**kwargs):
-            return [{"消息发送人": "alice", "消息内容": "history", "消息类型": "文本"}]
-
-        def listener(**kwargs):
-            event = MessageEvent("chat", "live", stable_id="live-1")
-            return {"消息事件": [event.to_dict()]}
-
-        def sender(friend, messages):
-            sent.append((friend, messages))
-
-        with tempfile.TemporaryDirectory() as directory:
-            store = AgentStore(Path(directory) / "agent.db")
-            config = AgentConfig(
-                group="chat",
-                db_path=str(Path(directory) / "agent.db"),
-                history_limit=1,
-                listen_duration="1s",
-            )
-            agent = LocalAgent(
-                config,
-                store=store,
-                history_reader=history_reader,
-                dialog_opener=lambda **kwargs: Dialog(),
-                listener=listener,
-                sender=sender,
-            )
-            agent.enqueue(AgentCommand("c-send", "send_text", "chat", {"text": "reply"}))
-            summary = agent.run_once()
-            self.assertEqual(summary["history_events"], 1)
-            self.assertEqual(summary["live_events"], 1)
-            self.assertEqual(summary["processed_commands"], 1)
-            self.assertEqual(sent, [("chat", ["reply"])])
-            self.assertEqual(dialog_closed, [True])
-            self.assertEqual(store.event_count(), 2)
-            agent.close()
-            store.close()
 
     def test_local_agent_persists_live_sequence(self):
         class Dialog:
@@ -440,39 +303,6 @@ class AgentTests(unittest.TestCase):
             self.assertEqual(store.claim_event_uploads(), [])
             store.close()
 
-    def test_local_agent_syncs_cloud_commands(self):
-        sent = []
-
-        class Cloud:
-            def __init__(self):
-                self.acks = []
-
-            def fetch_commands(self):
-                return [{"command_id": "cloud-1", "action": "send_text", "target": "chat", "payload": {"text": "from-cloud"}}]
-
-            def acknowledge(self, command_id, result):
-                self.acks.append((command_id, result))
-
-            def send_events(self, events):
-                return None
-
-            def heartbeat(self, health):
-                return None
-
-        with tempfile.TemporaryDirectory() as directory:
-            store = AgentStore(Path(directory) / "agent.db")
-            cloud = Cloud()
-            config = AgentConfig(group="chat", db_path=str(Path(directory) / "agent.db"), history_limit=0, listen_duration="0s")
-            agent = LocalAgent(config, store=store, sender=lambda friend, messages: sent.append((friend, messages)), cloud=cloud)
-            summary = agent.run_once()
-            self.assertEqual(summary["synced_commands"], 1)
-            self.assertEqual(summary["processed_commands"], 1)
-            self.assertEqual(sent, [("chat", ["from-cloud"])])
-            self.assertEqual(cloud.acks[0][0], "cloud-1")
-            self.assertEqual(cloud.acks[-1], ("cloud-1", {"state": "completed"}))
-            agent.close()
-            store.close()
-
     def test_console_page_and_state_require_console_token(self):
         with tempfile.TemporaryDirectory() as directory:
             server, store = create_server("127.0.0.1", 0, "secret", str(Path(directory) / "cloud.db"))
@@ -497,89 +327,6 @@ class AgentTests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 store.close()
-                thread.join(timeout=2)
-
-    def test_console_enqueues_command_for_agent(self):
-        with tempfile.TemporaryDirectory() as directory:
-            server, store = create_server("127.0.0.1", 0, "secret", str(Path(directory) / "cloud.db"))
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
-            connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
-            try:
-                payload = json.dumps(
-                    {
-                        "agent_id": "agent-1",
-                        "action": "send_text",
-                        "target": "chat",
-                        "payload": {"text": "from-console"},
-                    }
-                ).encode("utf-8")
-                connection.request(
-                    "POST",
-                    "/api/v1/console/commands",
-                    body=payload,
-                    headers={"Authorization": "Bearer secret", "Content-Type": "application/json"},
-                )
-                response = connection.getresponse()
-                result = json.loads(response.read())
-                self.assertEqual(response.status, 200)
-                self.assertTrue(result["created"])
-                self.assertEqual(store.list_command_history("agent-1")[0]["payload"], {"text": "from-console"})
-            finally:
-                connection.close()
-                server.shutdown()
-                server.server_close()
-                store.close()
-                thread.join(timeout=2)
-
-    def test_local_cloud_reference_server_round_trip(self):
-        with tempfile.TemporaryDirectory() as directory:
-            server, store = create_server("127.0.0.1", 0, "secret", str(Path(directory) / "cloud.db"))
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
-            try:
-                port = server.server_address[1]
-                client = CloudClient(f"http://127.0.0.1:{port}", "secret", agent_id="agent-1")
-                client.heartbeat({"state": "idle"})
-                client.send_events([MessageEvent("chat", "hello", stable_id="e-1").to_dict()])
-                store.enqueue("agent-1", AgentCommand("c-cloud", "send_text", "chat", {"text": "ok"}))
-                commands = client.fetch_commands()
-                self.assertEqual(commands[0]["command_id"], "c-cloud")
-                client.acknowledge("c-cloud", {"state": "queued"})
-                self.assertEqual(store.health()["agents"], 1)
-                client.acknowledge("c-cloud", {"state": "completed"})
-                with self.assertRaises(CloudError):
-                    client.acknowledge("missing", {"state": "completed"})
-                self.assertFalse(store.acknowledge("agent-1", "c-cloud", {"state": "queued"}))
-                self.assertEqual(store.health()["events"], 1)
-            finally:
-                server.shutdown()
-                server.server_close()
-                store.close()
-                thread.join(timeout=2)
-
-    def test_local_agent_completes_reference_server_command(self):
-        with tempfile.TemporaryDirectory() as directory:
-            server, cloud_store = create_server("127.0.0.1", 0, "secret", str(Path(directory) / "cloud.db"))
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
-            agent_store = AgentStore(Path(directory) / "agent.db")
-            try:
-                cloud_store.enqueue("agent-1", AgentCommand("c-e2e", "send_text", "chat", {"text": "ok"}))
-                client = CloudClient(f"http://127.0.0.1:{server.server_address[1]}", "secret", agent_id="agent-1")
-                sent = []
-                config = AgentConfig(group="chat", db_path=str(Path(directory) / "agent.db"), history_limit=0, listen_duration="0s")
-                agent = LocalAgent(config, store=agent_store, sender=lambda friend, messages: sent.append((friend, messages)), cloud=client)
-                summary = agent.run_once()
-                self.assertEqual(summary["processed_commands"], 1)
-                self.assertEqual(sent, [("chat", ["ok"])])
-                self.assertEqual(cloud_store.list_commands("agent-1"), [])
-                agent.close()
-            finally:
-                agent_store.close()
-                cloud_store.close()
-                server.shutdown()
-                server.server_close()
                 thread.join(timeout=2)
 
     def test_agent_token_env_rejects_non_string_values(self):

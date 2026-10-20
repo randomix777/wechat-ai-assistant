@@ -48,6 +48,9 @@ class Conversation:
     ordinal: int = 0
     #: 微信侧可用于二次核对的标识；读不到时为空，界面会显示"无法二次核对"。
     wxid: str = ""
+    #: 微信**没给名字**时的替代显示（解密库用成员名拼的「张三、李四等」）。
+    #: 只在 ``name`` 是原始 ID 时用；不进 identity（它不影响这个会话是谁）。
+    display_hint: str = ""
     #: 最后活跃时间（会话表里的 last_timestamp，秒）。0 = 不知道，
     #: 界面把不知道的排在后面。有它的会话按微信一样：越新越靠上。
     #: 注意：它不进 identity —— 时间一直在变，进去身份就永不稳定了。
@@ -60,13 +63,35 @@ class Conversation:
             raise ValueError(f"unknown conversation kind: {self.kind}")
 
     @property
+    def label(self) -> str:
+        """**给人看的**名字。
+
+        微信没给这个会话名字时（群没设名、联系人没昵称也没备注，解密库里
+        `contact` 那行是空的），`name` 只能是原始 ID —— ``18815684683@chatroom``
+        或 ``wxid_xxx``。原样甩到界面上，商户会以为"没读出来"（实际读到了，
+        只是微信那边就没名字）。
+
+        这里换成能读的占位。**只在显示层换**：``name`` 仍是数据键
+        （消息/订单的 ``group_id``、勾选的键），改它会让已经入库的消息对不上。
+        """
+        name = str(self.name or "").strip()
+        if name.endswith("@chatroom"):
+            return self.display_hint or "未命名群聊"
+        if name.startswith("wxid_"):
+            return self.display_hint or "未命名联系人"
+        return name
+
+    @property
     def disambiguation(self) -> str:
-        """人类可读的消歧标识，直接显示在界面上。"""
+        """人类可读的消歧标识，直接显示在界面上。
+
+        **不再带原始 wxid**：那是内部标识，摆在商户面前只是噪音（而且要二次
+        核对的是"是不是这个会话"，人数/名字比一串 ID 更容易认）。
+        """
+        label = self.label
         if self.kind == ConversationKind.GROUP and self.member_count:
-            return f"{self.name}（{self.member_count}人）"
-        if self.wxid:
-            return f"{self.name}（{self.wxid}）"
-        return self.name
+            return f"{label}（{self.member_count}人）"
+        return label
 
     @property
     def identity(self) -> str:
@@ -87,6 +112,7 @@ class Conversation:
             "member_count": self.member_count,
             "ordinal": self.ordinal,
             "wxid": self.wxid,
+            "display_hint": self.display_hint,
             "last_active": self.last_active,
             "disambiguation": self.disambiguation,
             "identity": self.identity,
@@ -100,6 +126,7 @@ class Conversation:
             member_count=int(data.get("member_count", 0)),
             ordinal=int(data.get("ordinal", 0)),
             wxid=str(data.get("wxid", "")),
+            display_hint=str(data.get("display_hint", "")),
             last_active=int(data.get("last_active", 0) or 0),
         )
 
@@ -165,6 +192,10 @@ class RealConversationSource:
         #: 解密库会话来源（应用层注入，缺密钥时为 None）。抛异常=不可用，
         #: 这里吞掉回落内存路，不把整次列举带崩。
         self.wcdb_fn = wcdb_fn
+        #: 上一次列举**实际用的是哪条路**：``wcdb``（解密库，真名真人数）/
+        #: ``memory``（内存扫描，只有群、名字还不全）/ 空串（没列过）。
+        #: 界面必须知道这个 —— 否则商户看到残缺名单，只会以为软件坏了。
+        self.last_source = ""
 
     def _guarded(self, function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         if self._ui_lock is None:
@@ -202,8 +233,13 @@ class RealConversationSource:
                     active = 0
                 found.append(Conversation(name=show, kind=item_kind,
                                           member_count=members, wxid=username,
-                                          last_active=active))
+                                          last_active=active,
+                                          # 微信没给名字时，解密库用成员名拼了个替代名
+                                          # （「张三、李四等」）—— 界面显示它，别显示 ID。
+                                          display_hint=str(
+                                              getattr(item, "display_hint", "") or "")))
             if found:
+                self.last_source = "wcdb"
                 return disambiguate(found)
         memory_groups: list[tuple[str, str]] = []
         if kind in ("", ConversationKind.GROUP):
@@ -217,6 +253,7 @@ class RealConversationSource:
                 found.append(Conversation(name=str(name), kind=ConversationKind.GROUP,
                                           member_count=0, wxid=str(wxid)))
         # 好友没有内存形态：解密库没给就选不到，界面照实说，先提密钥。
+        self.last_source = "memory" if found else ""
         return disambiguate(found)
 
 

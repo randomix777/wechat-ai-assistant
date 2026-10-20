@@ -385,7 +385,12 @@ def apply_wal(db_path: Path, wal_path: Path, enc_key: bytes, salt: bytes) -> int
 
 @dataclass
 class WcdbConversation:
-    """解密库里的一行会话。display 为空时调用方显示 username。"""
+    """解密库里的一行会话。
+
+    ``display`` 是微信自己给的名字（备注 > 昵称）；它为空的群，``display_hint``
+    是用成员名拼出来的替代名（见 :func:`member_name_hint`）—— 微信 PC 端对没有
+    名字的群就是这么显示的。两个都空时调用方才显示 username。
+    """
 
     username: str
     display: str
@@ -393,6 +398,87 @@ class WcdbConversation:
     member_count: int = 0
     last_timestamp: int = 0
     summary: str = ""
+    display_hint: str = ""
+
+
+def self_account_candidates(account_folder: str) -> tuple[str, ...]:
+    """从 ``xwechat_files/<账号>/db_storage`` 的目录名推出"我的 wxid"。
+
+    目录名长这样：``wxid_0201382014011_a064`` —— 后面那截是登录会话的后缀，
+    ``contact`` 表里自己的 username 是 ``wxid_0201382014011``。所以两个都当候选
+    （自定义微信号的账号没有 ``wxid_`` 前缀，同样适用）。
+    """
+    name = str(account_folder or "").strip()
+    if not name:
+        return ()
+    base = name.rsplit("_", 1)[0] if "_" in name else ""
+    return tuple(dict.fromkeys(item for item in (name, base) if item))
+
+
+def _is_self(username: str, candidates: Sequence[str]) -> bool:
+    name = str(username or "")
+    return any(name == item or name.startswith(item + "_") for item in candidates)
+
+
+def member_name_hint(contact: Any, username: str,
+                     exclude: Sequence[str] = ()) -> str:
+    """微信没给群名时，用成员名拼一个能认的替代名。
+
+    真机上的样子：``contact`` 那行的 ``remark`` 和 ``nick_name`` 都是空
+    （群从没在这台设备上命名/同步过），而 ``chatroom_member`` 里成员是齐的。
+    不补这一层，界面上就只剩 ``18815684683@chatroom`` —— 商户会以为没读出来。
+
+    取前 3 个有名字的成员，多于 3 人就加「等」，和微信 PC 端一致。
+    ``exclude`` 里是自己的 wxid：商户知道自己在群里，不需要看自己（微信 PC 端
+    同样把"我"排除在外）。一个名字都拼不出来就返回空串。
+    """
+    try:
+        row = contact.execute(
+            "SELECT id FROM contact WHERE username=?", (username,)).fetchone()
+        if row is None:
+            return ""
+        rows = contact.execute(
+            "SELECT ct.username, ct.remark, ct.nick_name FROM chatroom_member m "
+            "LEFT JOIN contact ct ON ct.id = m.member_id WHERE m.room_id=?",
+            (row["id"],)).fetchall()
+    except Exception:
+        LOGGER.debug("member name hint unavailable", exc_info=True)
+        return ""
+    names: list[str] = []
+    for member in rows:
+        try:
+            if _is_self(str(member["username"] or ""), exclude):
+                continue
+            name = str((member["remark"] or member["nick_name"] or "")).strip()
+        except (IndexError, KeyError, TypeError):
+            continue
+        if name and name not in names:
+            names.append(name)
+    if not names:
+        return ""
+    shown = names[:3]
+    return "、".join(shown) + ("等" if len(names) > len(shown) else "")
+
+
+def _unnamed_group_hints(contact: Any,
+                         exclude: Sequence[str] = ()) -> dict[str, str]:
+    """所有"微信没给名字"的群 → 成员名替代名。数量很少，一次算完。"""
+    hints: dict[str, str] = {}
+    try:
+        rows = contact.execute(
+            "SELECT username FROM contact WHERE username LIKE '%@chatroom'"
+            " AND COALESCE(remark,'')='' AND COALESCE(nick_name,'')=''").fetchall()
+    except Exception:
+        LOGGER.debug("unnamed group scan failed", exc_info=True)
+        return hints
+    for row in rows:
+        username = str(row["username"] or "")
+        if not username:
+            continue
+        hint = member_name_hint(contact, username, exclude)
+        if hint:
+            hints[username] = hint
+    return hints
 
 
 def display_name(row: Any) -> str:
@@ -404,7 +490,8 @@ def display_name(row: Any) -> str:
     return nick
 
 
-def read_sessions(contact_db: Path, session_db: Path) -> list[WcdbConversation]:
+def read_sessions(contact_db: Path, session_db: Path,
+                  exclude: Sequence[str] = ()) -> list[WcdbConversation]:
     """最近会话（按最后时间倒序）：群和好友都在这，带名、人数、摘要。"""
     contact = sqlite3.connect(str(contact_db))
     contact.row_factory = sqlite3.Row
@@ -421,6 +508,7 @@ def read_sessions(contact_db: Path, session_db: Path) -> list[WcdbConversation]:
                     counts[str(target[0])] = int(total)
         except sqlite3.OperationalError:
             LOGGER.debug("chatroom_member 不可读，人数记 0", exc_info=True)
+        unnamed = _unnamed_group_hints(contact, exclude)
     finally:
         contact.close()
     session = sqlite3.connect(str(session_db))
@@ -439,6 +527,9 @@ def read_sessions(contact_db: Path, session_db: Path) -> list[WcdbConversation]:
         username = str(row["username"] or "")
         if not username:
             continue
+        if _is_self(username, exclude):
+            # 自己的会话不该出现在"要读哪些会话"里。
+            continue
         person = people.get(username)
         display = display_name(person) if person is not None else ""
         kind = "group" if username.endswith("@chatroom") else "friend"
@@ -450,12 +541,18 @@ def read_sessions(contact_db: Path, session_db: Path) -> list[WcdbConversation]:
         out.append(WcdbConversation(
             username=username, display=display, kind=kind,
             member_count=counts.get(username, 0),
-            last_timestamp=last_ts, summary=summary))
+            last_timestamp=last_ts, summary=summary,
+            display_hint=unnamed.get(username, "") if not display else ""))
     return out
 
 
-def read_all_friends(contact_db: Path) -> list[WcdbConversation]:
-    """通讯录全部好友（local_type=1）：备注优先，按名排序。"""
+def read_all_friends(contact_db: Path,
+                     exclude: Sequence[str] = ()) -> list[WcdbConversation]:
+    """通讯录全部好友（local_type=1）：备注优先，按名排序。
+
+    ``exclude`` 是自己的 wxid：**自己在 ``contact`` 里也是 ``local_type=1``**，
+    不排除就会把自己列成一个可以勾选的"联系人"（商户读自己的消息没有意义）。
+    """
     contact = sqlite3.connect(str(contact_db))
     contact.row_factory = sqlite3.Row
     try:
@@ -466,12 +563,14 @@ def read_all_friends(contact_db: Path) -> list[WcdbConversation]:
         contact.close()
     out = [WcdbConversation(username=str(row["username"]),
                              display=display_name(row), kind="friend")
-           for row in rows if str(row["username"] or "")]
+           for row in rows
+           if str(row["username"] or "") and not _is_self(str(row["username"]), exclude)]
     out.sort(key=lambda item: (item.display or item.username).lower())
     return out
 
 
-def read_all_groups(contact_db: Path) -> list[WcdbConversation]:
+def read_all_groups(contact_db: Path,
+                    exclude: Sequence[str] = ()) -> list[WcdbConversation]:
     """通讯录里全部群（不限最近）：按昵称排序，带人数。"""
     contact = sqlite3.connect(str(contact_db))
     contact.row_factory = sqlite3.Row
@@ -489,11 +588,13 @@ def read_all_groups(contact_db: Path) -> list[WcdbConversation]:
                     counts[str(target[0])] = int(total)
         except sqlite3.OperationalError:
             pass
+        unnamed = _unnamed_group_hints(contact, exclude)
     finally:
         contact.close()
     out = [WcdbConversation(
         username=str(row["username"]), display=display_name(row), kind="group",
-        member_count=counts.get(str(row["username"]), 0)) for row in rows]
+        member_count=counts.get(str(row["username"]), 0),
+        display_hint=unnamed.get(str(row["username"]), "")) for row in rows]
     out.sort(key=lambda item: (item.display or item.username).lower())
     return out
 
@@ -840,6 +941,18 @@ class WcdbReader:
         """上次不可用的原因（界面提示用）。"""
         return self._error
 
+    def self_candidates(self) -> tuple[str, ...]:
+        """我自己的 wxid 候选（从 ``db_storage`` 的上级目录名推出来）。
+
+        用来在"微信没给群名、用成员名拼替代名"时把自己排除掉 —— 商户知道
+        自己在群里，看自己名字没有信息量。推不出来就返回空（不排除任何人）。
+        """
+        try:
+            return self_account_candidates(self.db_storage.parent.name)
+        except Exception:
+            LOGGER.debug("self account candidates unavailable", exc_info=True)
+            return ()
+
     def load_keys(self) -> dict:
         """读密钥文件。结构 `{库相对路径: {enc_key, salt}}`，坏了当没有。
 
@@ -865,7 +978,8 @@ class WcdbReader:
 
         ``extra`` 追加要的库（读历史加 ``message/message_0.db``）。
         用完调用方负责删（见 :meth:`cleanup`）。任何一步失败都抛
-        :class:`WcdbUnavailable`，调用方回落内存路。
+        :class:`WcdbUnavailable`，怎么办由调用方定：列举会话会回落内存 carve，
+        读消息只报错让商户去补钥匙。
         """
         keys = self.load_keys()
         wanted = (*NEEDED_DATABASES, *(str(item) for item in extra))
@@ -1065,17 +1179,18 @@ class WcdbReader:
         try:
             contact_db = ready["contact/contact.db"]
             session_db = ready["session/session.db"]
-            found = read_sessions(contact_db, session_db)
+            exclude = self.self_candidates()
+            found = read_sessions(contact_db, session_db, exclude)
             seen = {item.username for item in found}
             if not kind or kind == "group":
                 # 最近里没有的冷群也并进来（显示名、人数都有，只是没时间）。
-                for item in read_all_groups(contact_db):
+                for item in read_all_groups(contact_db, exclude):
                     if item.username not in seen:
                         seen.add(item.username)
                         found.append(item)
             if not kind or kind == "friend":
                 # 通讯录好友（local_type=1），最近里没有的也并进来。
-                for item in read_all_friends(contact_db):
+                for item in read_all_friends(contact_db, exclude):
                     if item.username not in seen:
                         seen.add(item.username)
                         found.append(item)
@@ -1121,11 +1236,13 @@ __all__ = [
     "decrypt_database",
     "derive_conversation_kind",
     "display_name",
+    "member_name_hint",
     "message_table_exists",
     "message_table_name",
     "read_all_friends",
     "read_all_groups",
     "read_messages",
     "read_sessions",
+    "self_account_candidates",
     "verify_enc_key",
 ]

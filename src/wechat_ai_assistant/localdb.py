@@ -232,7 +232,9 @@ def find_record_before(chunk: bytes, anchor_pos: int, back: int = RECORD_LOOKBEH
 
 
 #: wxid → 显示名缓存（同一进程内有效，微信重启/切号后 stale ——
-#: 调用方读到空时清一次再试，见 _read_via_localdb 注释）。
+#: 调用方读到空时清一次再试）。消息读取那条内存路已退役（见
+#: ``history_read.SENDER_SOURCES``），这个缓存现在只服务会话列表
+#: （``list_group_conversations``）和备注名解析。
 #: 键是 ASCII wxid，不含密钥材料，可放心放内存。
 _NAME_CACHE: dict[str, str] = {}
 

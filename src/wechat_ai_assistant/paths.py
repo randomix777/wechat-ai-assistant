@@ -92,6 +92,36 @@ def default_data_dir() -> Path:
     return old_path
 
 
+def scratch_dir(name: str = "") -> Path:
+    """临时/中间文件放哪：**跟着数据目录走**。
+
+    免安装版的承诺是"整个软件就在这个文件夹里"：数据、日志、缓存、下载的组件都该
+    在它旁边，而不是往 C 盘的 ``%TEMP%`` 撒。以前 Edge 的浏览器配置、WebView2 安装包、
+    下载中的更新包、诊断报告全写在 ``%TEMP%`` —— 商户换台机器或清理系统临时目录，
+    这些东西就散落在别人看不见的地方。现在统一放到 ``<数据目录>/tmp``：
+
+    * 免安装（有 ``portable.flag``）→ ``<程序目录>/data/tmp``，跟着文件夹走；
+    * 普通安装 → ``%LOCALAPPDATA%\\wechat-ai-assistant\\tmp``。
+
+    **例外（必须留在系统临时目录）**：换版脚本 ``pyw-apply-*.bat`` —— 它第一步就是
+    把整个程序目录改名，脚本自己绝不能待在那个目录里。见 ``updater.build_updater_script``。
+
+    建不出来（只读介质、权限不足）就退回系统临时目录：中间文件写不进去不能拦住启动。
+    """
+    try:
+        base = default_data_dir() / "tmp"
+        target = base / name if name else base
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+    except Exception:
+        fallback = Path(tempfile.gettempdir()) / "pyw" / name if name else Path(tempfile.gettempdir()) / "pyw"
+        try:
+            fallback.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        return fallback
+
+
 def asset_path(name: str) -> Path | None:
     """Locate a bundled static asset (currently the window icon).
 

@@ -8,6 +8,7 @@ pywin32>=308
 pywin32-ctypes>=0.2.2
 pywinauto>=0.6.8
 pillow>=10.4.0
+pywebview>=6.2; python_version >= "3.10"
 imageio-ffmpeg>=0.6.0
 pycryptodome>=3.20
 sounddevice>=0.5.1

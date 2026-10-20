@@ -68,25 +68,30 @@ class CoverageCarriesBothCountsTests(unittest.TestCase):
 class BothInterfacesExplainZeroTests(unittest.TestCase):
     """"\u5b8c\u6210\uff0c0 \u6761"\u8fd9\u53e5\u8bdd\u4f1a\u6b32\u3002\u4e24\u4e2a\u754c\u9762\u90fd\u5f97\u8bf4\u6e05\u695a\u3002"""
 
-    def test_the_tk_ui_explains_zero(self):
-        ui = (ROOT / "src/wechat_ai_assistant/merchant_ui.py").read_text(encoding="utf-8")
-        self.assertIn("fetched_count", ui)
-        self.assertIn("\u8fd9\u4e0d\u7b49\u4e8e\u7fa4\u91cc\u6ca1\u6d88\u606f", ui,
-                      "\u9875\u9762\u4e0a\u4ecd\u7136\u53ea\u8bf4\u300c\u672c\u6b21 0 \u6761\u300d")
-
     def test_the_web_ui_explains_zero(self):
-        dev = (ROOT / "src/wechat_ai_assistant/web_dev.py").read_text(encoding="utf-8")
-        page = (ROOT / "src/wechat_ai_assistant/web_page.py").read_text(encoding="utf-8")
-        self.assertIn('"fetched"', dev)
-        self.assertIn("row.fetched", page)
+        """Web 端把两个计数都给出来（页面才分得出两种 0）。
 
-    def test_a_failed_read_is_not_claimed_as_success(self):
-        """"\u4e00\u6761\u90fd\u6ca1\u8bfb\u5230\u300d\u65f6\u4e0d\u5f97\u53ea\u8bf4\u300c\u5b8c\u6210\u300d\u3002"""
-        ui = (ROOT / "src/wechat_ai_assistant/merchant_ui.py").read_text(encoding="utf-8")
-        i = ui.index("\u8fd9\u4e0d\u7b49\u4e8e\u7fa4\u91cc\u6ca1\u6d88\u606f")
-        around = ui[max(0, i - 700):i]
-        self.assertIn("not item.error", around, "\u8bfb\u5931\u8d25\u65f6\u5e94\u8be5\u53ea\u8bf4\u300c\u8bfb\u5931\u8d25\u300d")
-        self.assertIn("not item.skipped", around, "\u4e0a\u6b21\u5df2\u8bfb\u5b8c\u65f6\u4e0d\u5e94\u62a5\u300c\u6ca1\u8bfb\u5230\u300d")
+        断言**数据契约**而不是某个文件的源码：这两个值由 ``web_server`` 的
+        读取结果视图给出，测试直接调它 —— 文件怎么拆、叫什么名字都不影响。
+        """
+        from types import SimpleNamespace
+
+        from wechat_ai_assistant import web_server
+
+        item = SimpleNamespace(
+            conversation=SimpleNamespace(name="鲜果批发群", kind="group"),
+            message_count=0, truncated=False, unresolved_senders=0,
+            fetched_count=12, skipped=False, error="",
+        )
+        result = SimpleNamespace(total_messages=0, mode="all", coverage=[item],
+                                 import_ids=[], headline=lambda: "本次没有新消息")
+        view = web_server._history_view(result)
+        row = view["coverage"][0]
+        self.assertEqual(row["count"], 0)
+        self.assertEqual(row["fetched"], 12,
+                         "「读取器拿回 12 条但一条都没进库」和「群里没消息」是两回事")
+        self.assertTrue(view["headline"], "商户看的那句话要一起给出来")
+
 
 
 class ZeroDoesNotBlockTheSummaryTests(unittest.TestCase):

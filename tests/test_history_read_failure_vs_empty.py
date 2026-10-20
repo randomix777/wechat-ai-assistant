@@ -6,7 +6,7 @@
 （游标把 0 条记成 exhausted，之后永远跳过），但**第一次为什么读到 0 条**
 一直没有定位。
 
-这次找到了，�� ``WeChatAuto.dump_chat_history``：
+这次找到了，是 ``WeChatAuto.dump_chat_history``：
 
     chat_history_list = chat_history_window.child_window(**Lists.ChatHistoryList)
     if not chat_history_list.exists(timeout=1):

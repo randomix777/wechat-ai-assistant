@@ -65,15 +65,22 @@ class LogFileTests(unittest.TestCase):
     def test_it_is_installed_before_anything_else_starts(self):
         """日志必须最先装好 —— 装晚了，前面出错的部分就没了。
 
-        只在 ``main()`` 里找：模块顶部有这些名字的 import 和函数定义，
-        拿它们的位置比是比错的。
+        装配统一在 ``build_runtime``（Tk 入口和 Web 入口共用），所以判据是：
+        在 ``build_runtime`` 里，装日志排在**建库 / 凭据 / 队列之前**；
+        而 ``main`` 先装配、再开界面。比"某个函数第几行"这种写法更抗重构。
         """
         source = (ROOT / "src" / "wechat_ai_assistant" / "merchant_app.py").read_text(encoding="utf-8")
-        main_body = source[source.index("def main("):]
-        install_at = main_body.index("diagnostics.install(")
-        for later in ("ensure_local_store(", "build_application(", "MerchantWindow("):
-            self.assertLess(install_at, main_body.index(later),
+        runtime = source[source.index("def build_runtime("):source.index("def main(")]
+        install_at = runtime.index("diagnostics.install(")
+        for later in ("ensure_local_store(", "CredentialStore(", "PendingQueue(",
+                      "build_application("):
+            self.assertLess(install_at, runtime.index(later),
                             f"日志装得太晚：{later} 之前出错的日志就丢了")
+
+        main_body = source[source.index("def main("):]
+        self.assertLess(main_body.index("build_runtime("),
+                        main_body.index("_self_check("),
+                        "main 要先装配（含装日志）再干别的")
 
     def test_failing_to_install_does_not_stop_the_program(self):
         """日志是手段，程序是目的。接不上就让程序照常跑。"""

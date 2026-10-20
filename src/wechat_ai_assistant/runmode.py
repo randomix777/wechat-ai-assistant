@@ -1,17 +1,16 @@
-"""运行模式与本地设置。
+"""运行设置（本地）。
 
-三种模式，商户用中文就能选：
+## 只有一种模式：后台整理
 
-* ``background`` **后台整理** —— 读取和分析、记单，**不发任何消息**。这是
-  默认模式，也是唯一不需要商户额外确认就能用的模式。
-* ``auto_take`` **自动接单与回复** —— 首次对指定会话开启后，普通订单不再
-  逐单确认，自动记单并发送回执。
-* ``paused`` **暂停** —— 立即停止发送。已经排队但没发出的回执留在队列里，
-  恢复后继续，不会丢也不会重复。
+产品**不会**向微信发送任何消息 —— 读消息、整理、记单、导出，仅此而已。
+所以以前那三种模式（后台整理 / 自动接单与回复 / 暂停）只剩下一种，
+`RunMode` 和 `AutoOrderSettings.mode` 保留只是为了**兼容老配置**：
+老版本 settings.json 里写着 ``auto_take`` 或 ``paused`` 的，读出来一律按
+``background`` 处理（读得出来，但不会再发任何东西）。
 
-另外有一道独立的开关：**是否允许本机被自动接单占用**。未开启时即使选了
-``auto_take`` 也不会发送 —— 因为自动回复要操作微信窗口，可能影响正在用电脑
-的商户。这道开关必须显式打开，不能默认打开。
+## 剩下这些设置还有用
+
+合并窗口、金额上限、缺价策略这些是**整理**阶段的行为，与发送无关。
 """
 from __future__ import annotations
 
@@ -25,16 +24,13 @@ from .conversations import Conversation
 
 
 class RunMode:
+    #: 读消息、整理、记单，**不发任何消息**。产品只有这一种模式。
     BACKGROUND = "background"
-    AUTO_TAKE = "auto_take"
-    PAUSED = "paused"
 
-    ALL = (BACKGROUND, AUTO_TAKE, PAUSED)
+    ALL = (BACKGROUND,)
 
     COPY = {
         BACKGROUND: ("后台整理", "读取并分析消息、记单，不发送任何消息。"),
-        AUTO_TAKE: ("自动接单与回复", "普通订单自动记单并发送一次回执。"),
-        PAUSED: ("已暂停", "已停止发送。恢复后继续发送未发出的回执。"),
     }
 
 
@@ -45,11 +41,10 @@ DEFAULT_MAX_MERGE_WAIT_SECONDS = 90.0
 
 @dataclass
 class AutoOrderSettings:
-    """自动接单的可配置项。全部有安全默认值。"""
+    """自动记单的可配置项。全部有安全默认值。"""
 
+    #: 恒为 ``background``。字段留着只为读得懂老配置。
     mode: str = RunMode.BACKGROUND
-    #: 是否允许本机被自动接单占用。未开启时永远不发送。
-    allow_local_automation: bool = False
     #: 缺价时是否允许先记单、标价格待定，而不是转人工。
     allow_price_pending: bool = False
     #: 单笔金额上限，超过转人工。None 表示不限制。
@@ -60,12 +55,11 @@ class AutoOrderSettings:
     merge_window_seconds: float = DEFAULT_MERGE_WINDOW_SECONDS
     #: 合并等待上限。无论客户发多少条，最多等这么久。
     max_merge_wait_seconds: float = DEFAULT_MAX_MERGE_WAIT_SECONDS
-    #: 自动发送回执。关掉后仍然自动记单，只是不发消息。
-    auto_reply: bool = True
 
     def __post_init__(self) -> None:
         if self.mode not in RunMode.ALL:
-            raise ValueError(f"unknown run mode: {self.mode}")
+            # 老配置（auto_take / paused / 任何未知值）一律落回唯一模式。
+            self.mode = RunMode.BACKGROUND
         if self.merge_window_seconds < 0 or self.max_merge_wait_seconds < 0:
             raise ValueError("merge windows must not be negative")
         if self.max_merge_wait_seconds < self.merge_window_seconds:
@@ -73,41 +67,32 @@ class AutoOrderSettings:
             self.max_merge_wait_seconds = self.merge_window_seconds
 
     @property
-    def sending_allowed(self) -> bool:
-        """能不能发消息。两个条件都必须满足。"""
-        return self.mode == RunMode.AUTO_TAKE and self.allow_local_automation and self.auto_reply
-
-    @property
     def recording_allowed(self) -> bool:
-        """能不能自动记单。后台整理模式也记单，只是不发。"""
-        return self.mode in (RunMode.BACKGROUND, RunMode.AUTO_TAKE)
+        """能不能自动记单。恒为真 —— 产品本来就只做这件事。"""
+        return True
 
     def label(self) -> str:
         return RunMode.COPY[self.mode][0]
 
     def describe(self) -> str:
-        if self.mode == RunMode.AUTO_TAKE and not self.allow_local_automation:
-            return "自动接单与回复（尚未允许本机自动操作，暂不发送）"
         return RunMode.COPY[self.mode][1]
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "mode": self.mode,
-            "allow_local_automation": self.allow_local_automation,
             "allow_price_pending": self.allow_price_pending,
             "max_order_amount": self.max_order_amount,
             "max_line_quantity": self.max_line_quantity,
             "merge_window_seconds": self.merge_window_seconds,
             "max_merge_wait_seconds": self.max_merge_wait_seconds,
-            "auto_reply": self.auto_reply,
         }
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "AutoOrderSettings":
         defaults = cls()
         return cls(
+            # 老配置里的 auto_take / paused 在 __post_init__ 里落回 background。
             mode=str(data.get("mode", defaults.mode)),
-            allow_local_automation=bool(data.get("allow_local_automation", defaults.allow_local_automation)),
             allow_price_pending=bool(data.get("allow_price_pending", defaults.allow_price_pending)),
             max_order_amount=(
                 None if data.get("max_order_amount") is None else float(data["max_order_amount"])
@@ -115,7 +100,6 @@ class AutoOrderSettings:
             max_line_quantity=float(data.get("max_line_quantity", defaults.max_line_quantity)),
             merge_window_seconds=float(data.get("merge_window_seconds", defaults.merge_window_seconds)),
             max_merge_wait_seconds=float(data.get("max_merge_wait_seconds", defaults.max_merge_wait_seconds)),
-            auto_reply=bool(data.get("auto_reply", defaults.auto_reply)),
         )
 
 

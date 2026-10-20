@@ -95,7 +95,9 @@ class ImportCustomersTests(unittest.TestCase):
         self.assertEqual(len(result["problems"]), 1)
         problem = result["problems"][0]
         self.assertIn("缺少客户称呼", problem)
-        self.assertIn("4", problem, "要说清是第几行，否则商户没法回去改")
+        # 行号按**表格**算（表头第 1 行）：CSV 里表头之后第 4 行 = 表格第 5 行。
+        # 商户是照着 Excel 找的，报 CSV 的序号他会在错误的位置上改。
+        self.assertIn("5", problem, "要说清是表格第几行，否则商户没法回去改")
 
     def test_the_file_may_have_a_byte_order_mark(self):
         """Excel 导出的 CSV 常带 BOM，不处理的话表头第一个字段会带不可见字符。"""

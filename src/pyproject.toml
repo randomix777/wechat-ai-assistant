@@ -1,6 +1,6 @@
 [project]
 name="wechat-ai-assistant"
-version="1.9.9"
+version="1.11.1"
 description="Windows WeChat automation and AI merchant assistant"
 readme="README.md"
 license={text="LGPL"}
@@ -31,6 +31,8 @@ dependencies=[
     "pywinauto>=0.6.8",
     "psutil>=5.9.5",
     "pillow>=10.4.0",
+    # Native app window with the Windows WebView2 (Chromium) renderer.
+    "pywebview>=6.2",
     # Convert the first frame of WeChat's WXGF/HEVC image container to a
     # standard JPEG before sending it to vision models.
     "imageio-ffmpeg>=0.6.0",

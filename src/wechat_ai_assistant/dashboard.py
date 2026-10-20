@@ -15,7 +15,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Sequence
 
 from .conversations import Conversation
-from .runmode import AutoOrderSettings, RunMode
+from .runmode import AutoOrderSettings
 from .wechat_state import WeChatState, WeChatStatus
 
 
@@ -32,6 +32,12 @@ class OrderRow:
     change_type: str = "new"
     version: int = 1
     updated_at: str = ""
+    #: 这单是从哪个会话来的（群里还是某个联系人）。
+    #:
+    #: 商户是可以同时接几个群的；「张姐」在批发群和团购群是**同一个客户**
+    #: （``customers`` 按名字唯一），订单列表里不写出处，两边的单子算到一起
+    #: 就成了没人查得清的糊涂账。
+    group: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -44,6 +50,7 @@ class OrderRow:
             "change_type": self.change_type,
             "version": self.version,
             "updated_at": self.updated_at,
+            "group": self.group,
         }
 
 
@@ -76,7 +83,6 @@ METRIC_DEFINITIONS = {
     "auto_recorded": "自动记单：已由系统记下、尚未人工确认的订单（不需要逐单确认）",
     "stock": "备货汇总：只统计有效订单版本，按商品合计",
     "payment_claims": "待核对付款：客户声称已付款，需要人工核对收款；不等于已到账",
-    "send_errors": "发送异常：回执没有发出去或结果无法确认的条数",
     "quota": "剩余分析额度：来自云端账号，本地离线时显示上次已知值",
 }
 
@@ -168,7 +174,7 @@ class DashboardBuilder:
         rows = self.orders.db.execute(
             f"""
             SELECT o.id, o.status, o.delivery_date, o.change_type, o.version, o.updated_at,
-                   c.name AS customer
+                   o.group_id, c.name AS customer
             FROM orders o LEFT JOIN customers c ON c.id = o.customer_id
             WHERE o.merchant_id=? AND o.status IN ({placeholders}) AND o.updated_at >= ?
             ORDER BY o.updated_at DESC LIMIT 200
@@ -203,6 +209,7 @@ class DashboardBuilder:
                     change_type=str(row["change_type"] or "new"),
                     version=int(row["version"] or 1),
                     updated_at=str(row["updated_at"] or ""),
+                    group=str(row["group_id"] or ""),
                 )
             )
         return result
@@ -357,10 +364,6 @@ class HomeView:
     model_executed: bool = False
     conversation: str = ""
     conversation_note: str = ""
-    mode: str = RunMode.BACKGROUND
-    mode_note: str = ""
-    can_send: bool = False
-    send_block_reason: str = ""
     #: 有效订单（不含被替代的旧版本）。
     effective: list[OrderRow] = field(default_factory=list)
     #: 真正需要商户动手的订单。
@@ -377,11 +380,6 @@ class HomeView:
     system_failures: list[dict[str, Any]] = field(default_factory=list)
     quota_headline: str = "未登录产品账号"
     quota_ok: bool = False
-    pending_receipts: int = 0
-    unknown_receipts: int = 0
-    failed_receipts: int = 0
-    #: 发送异常 = 没发出去 + 结果无法确认。
-    send_errors: int = 0
     parse_failures: int = 0
     #: 每个指标的口径，界面上直接显示。
     definitions: dict[str, str] = field(default_factory=lambda: dict(METRIC_DEFINITIONS))

@@ -725,6 +725,43 @@ class BackgroundTests(unittest.TestCase):
         self.assertEqual(seen.get("current"), "1.9.9",
                          "后台查更新必须带上本机版本号")
 
+    def test_found_but_not_downloaded_is_reported(self):
+        """查到新版却没下成，必须回调一句 —— 否则商户以为"再也不更新了"。
+
+        最常见的成因就是没登录：工具中心的下载地址要一枚登录态换来的短效凭据。
+        """
+        info = {"version": "1.9.9", "zip_url": "x"}
+        failures: list[tuple] = []
+        staged: list = []
+        with unittest.mock.patch.object(updater, "is_frozen_app", return_value=True), \
+            unittest.mock.patch.object(updater, "check_for_update", return_value=info), \
+            unittest.mock.patch.object(updater, "download_and_stage", return_value=None):
+            updater.check_in_background(on_staged=staged.append,
+                                        on_failed=lambda i, hint: failures.append((i, hint)),
+                                        jyi_client=None).join(timeout=10)
+        self.assertEqual(staged, [], "没下成就不能说「已就绪」")
+        self.assertEqual(len(failures), 1, "失败要说一次")
+        returned_info, hint = failures[0]
+        self.assertEqual(returned_info, info)
+        self.assertIn("登录", hint, "没登录时要直接说登录，别只说「下载失败」")
+
+    def test_a_download_failure_with_login_says_retry(self):
+        """登录着也下不下来时，说的话不能是"去登录"（那会把人指错方向）。"""
+        class LoggedIn:
+            def tool_access_token(self):
+                return "jyi_tool_abc"
+
+        failures: list[str] = []
+        with unittest.mock.patch.object(updater, "is_frozen_app", return_value=True), \
+            unittest.mock.patch.object(updater, "check_for_update",
+                                       return_value={"version": "1.9.9"}), \
+            unittest.mock.patch.object(updater, "download_and_stage", return_value=None):
+            updater.check_in_background(on_failed=lambda i, hint: failures.append(hint),
+                                        jyi_client=LoggedIn()).join(timeout=10)
+        self.assertEqual(len(failures), 1)
+        self.assertNotIn("登录", failures[0], "已经登录了，别叫他去登录")
+        self.assertIn("再试", failures[0])
+
 
 class ApplyTests(unittest.TestCase):
     def test_dev_mode_does_nothing(self):
@@ -753,36 +790,154 @@ class ApplyTests(unittest.TestCase):
             shutil.rmtree(base, ignore_errors=True)
 
 
+class BlockedVersionTests(unittest.TestCase):
+    """换版失败留下的记号：读得出来，而且**不许被清掉**（清了会重下同一个坏版本）。"""
+
+    def setUp(self):
+        self.base = Path(tempfile.mkdtemp(prefix="pyw-blocked-"))
+        self.addCleanup(shutil.rmtree, self.base, True)
+
+    def _mark(self, version: str) -> None:
+        updater.blocked_marker(version, self.base).write_text("没起来", encoding="utf-8")
+
+    def test_without_a_marker_there_is_nothing_to_say(self):
+        self.assertEqual(updater.blocked_versions(self.base), [])
+        self.assertEqual(updater.failed_update_note(self.base), "")
+
+    def test_the_newest_blocked_version_is_the_one_named(self):
+        self._mark("1.9.9")
+        self._mark("1.10.0")
+        self.assertEqual(updater.blocked_versions(self.base), ["1.9.9", "1.10.0"])
+        note = updater.failed_update_note(self.base)
+        self.assertIn("1.10.0", note)
+        self.assertNotIn("1.9.9", note, "说最近那一版就够了")
+
+    def test_the_marker_stays_so_the_broken_version_is_not_downloaded_again(self):
+        self._mark("1.10.0")
+        self.assertTrue(updater.version_is_blocked("1.10.0", self.base))
+        self.assertFalse(updater.version_is_blocked("1.10.1", self.base),
+                         "别的版本不该被连坐")
+
+
 class UpdateNoteTests(unittest.TestCase):
-    """新版下好后顶栏要留一句话，不然商户下次打开发现变了版本对不上。"""
+    """新版暂存好了要说一句 —— 静默更新不能等于一声不吭。
 
-    def _window(self):
-        import tkinter as tk
+    以前这句挂在 Tk 顶栏（界面已删）。现在由 ``web_server`` 写进状态，
+    页面顶栏显示；测试直接验那一步，不点窗口。
+    """
+
+    def test_staged_version_shows_in_the_state(self):
         import types
-        from tkinter import ttk
+        from unittest import mock
 
-        from wechat_ai_assistant.merchant_ui import MerchantWindow
+        from wechat_ai_assistant import web_server
 
-        root = tk.Tk()
-        root.withdraw()
-        self.addCleanup(root.destroy)
-        label = ttk.Label(root, text="")
-        label.pack()
-        window = MerchantWindow.__new__(MerchantWindow)
-        window._widgets = {"update_note": label}
-        window.app = types.SimpleNamespace()
-        return window, label
+        state = web_server.WebState(app=types.SimpleNamespace())
+        captured = {}
 
-    def test_staged_version_shows(self):
-        window, label = self._window()
-        window._on_update_staged({"version": "1.9.9"})
-        self.assertIn("1.9.9", label.cget("text"))
-        self.assertIn("下次", label.cget("text"))
+        def fake_check(on_staged=None, **_kwargs):
+            captured["cb"] = on_staged
+            return types.SimpleNamespace()
+
+        with mock.patch("wechat_ai_assistant.updater.check_in_background", fake_check):
+            web_server.start_background_update_check(
+                state, types.SimpleNamespace(client=None), delay=0.0)
+            for _ in range(50):
+                if "cb" in captured:
+                    break
+                import time as _time
+
+                _time.sleep(0.05)
+            captured["cb"]({"version": "1.9.9"})
+
+        note = state.snapshot()["update_note"]
+        self.assertIn("1.9.9", note)
+        self.assertIn("下次打开", note)
+
+    def test_a_download_failure_is_told_to_the_merchant(self):
+        """查到新版却没下成：顶栏要说出来，不能只在日志里。
+
+        最常见的成因是没登录（工具中心的下载地址要登录态换的凭据）。
+        不说的话，商户看到的现象是"这软件再也不更新了"，客服也问不出所以然。
+        """
+        import types
+        from unittest import mock
+
+        from wechat_ai_assistant import web_server
+
+        state = web_server.WebState(app=types.SimpleNamespace())
+        captured = {}
+
+        def fake_check(on_staged=None, on_failed=None, **_kwargs):
+            captured["failed"] = on_failed
+            return types.SimpleNamespace()
+
+        with mock.patch("wechat_ai_assistant.updater.check_in_background", fake_check):
+            web_server.start_background_update_check(
+                state, types.SimpleNamespace(client=None), delay=0.0)
+            for _ in range(50):
+                if "failed" in captured:
+                    break
+                time.sleep(0.05)
+            self.assertIsNotNone(captured.get("failed"), "要接上失败回调")
+            captured["failed"]({"version": "9.9.9"}, "还没登录产品账号，登录后才能下载")
+
+        note = state.snapshot()["update_note"]
+        self.assertIn("9.9.9", note, "要说清是哪个版本")
+        self.assertIn("没下下来", note)
+        self.assertIn("登录", note, "把原因和下一步一起给出来")
+
+    def test_a_failed_swap_is_told_to_the_merchant(self):
+        """上次换版没成：界面上要有一句话，不能只躺在 %TEMP% 的运行日志里。"""
+        import shutil
+        import tempfile
+        import types
+        from unittest import mock
+
+        from wechat_ai_assistant import updater, web_server
+
+        base = Path(tempfile.mkdtemp(prefix="pyw-blocked-ui-"))
+        self.addCleanup(shutil.rmtree, base, True)
+        updater.blocked_marker("9.9.9", base).write_text("没起来", encoding="utf-8")
+        state = web_server.WebState(app=types.SimpleNamespace())
+
+        with mock.patch.object(updater, "app_dir", return_value=base), \
+                mock.patch("wechat_ai_assistant.updater.check_in_background",
+                           lambda **_kwargs: types.SimpleNamespace()):
+            web_server.start_background_update_check(
+                state, types.SimpleNamespace(client=None), delay=0.0)
+            for _ in range(50):
+                if state.update_note:
+                    break
+                time.sleep(0.05)
+
+        self.assertIn("9.9.9", state.update_note)
 
     def test_empty_info_stays_quiet(self):
-        window, label = self._window()
-        window._on_update_staged({})
-        self.assertEqual(label.cget("text"), "")
+        import types
+        from unittest import mock
+
+        from wechat_ai_assistant import web_server
+
+        state = web_server.WebState(app=types.SimpleNamespace())
+        captured = {}
+
+        def fake_check(on_staged=None, **_kwargs):
+            captured["cb"] = on_staged
+            return types.SimpleNamespace()
+
+        with mock.patch("wechat_ai_assistant.updater.check_in_background", fake_check):
+            web_server.start_background_update_check(
+                state, types.SimpleNamespace(client=None), delay=0.0)
+            for _ in range(50):
+                if "cb" in captured:
+                    break
+                import time as _time
+
+                _time.sleep(0.05)
+            captured["cb"]({})
+
+        self.assertEqual(state.snapshot()["update_note"], "")
 
 
 class StartupStaysOfflineTests(unittest.TestCase):
@@ -804,9 +959,13 @@ class StartupStaysOfflineTests(unittest.TestCase):
                              f"启动器里不该再调用 {banned}：那是启动期联网下载，会卡启动")
 
     def test_the_window_checks_in_the_background_after_it_is_up(self):
-        text = self._source("merchant_ui.py")
-        self.assertIn("after(2000, self._start_update_check)", text)
-        self.assertIn("check_in_background(on_staged=self._on_update_staged)", text)
+        """界面起来**之后**才查新版：启动路径上不联网，双击就该看见窗口。"""
+        text = self._source("web_app.py")
+        self.assertIn("start_background_update_check", text)
+        self.assertIn("open_window", text)
+        server = self._source("web_server.py")
+        self.assertIn("delay: float = 2.0", server, "至少要等窗口起来再查")
+        self.assertIn("check_in_background(", server)
 
     def test_nothing_pending_means_nothing_to_do(self):
         from wechat_ai_assistant import launcher

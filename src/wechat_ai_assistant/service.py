@@ -36,14 +36,7 @@ from business_agent.contracts.errors import AgentError  # noqa: E402
 from .conversations import Conversation  # noqa: E402
 from .merging import BufferedMessage, MergeKey  # noqa: E402
 from .local_parse import LOCAL_BLOCKED  # noqa: E402
-from .receipts import (  # noqa: E402
-    NO_RECEIPT_SOURCES,
-    ReceiptOutbox,
-    ReceiptRequest,
-    build_receipt_text,
-    receipt_kind_for,
-)
-from .runmode import AutoOrderSettings, RunMode  # noqa: E402
+from .runmode import AutoOrderSettings  # noqa: E402
 
 
 class JobTrace:
@@ -60,7 +53,6 @@ class JobTrace:
         self.model_executed = False
         #: 有几条短消息被合并成了这一条。商户需要看得见这个合并。
         self.on_merged: Callable[[str, tuple], None] | None = None
-        self.receipt_key = ""
         self.created_at = time.time()
         #: 本次解析覆盖的全部原始消息（短消息合并时大于 1）。
         self.merged_event_ids: tuple[str, ...] = ()
@@ -75,7 +67,6 @@ class JobTrace:
             "status": self.status,
             "error_category": self.error_category,
             "model_executed": self.model_executed,
-            "receipt_key": self.receipt_key,
             "created_at": self.created_at,
             "merged_event_ids": list(self.merged_event_ids),
         }
@@ -108,7 +99,6 @@ class ApplyOutcome:
     needs_review: bool = False
     question: str = ""
     ambiguities: tuple[str, ...] = ()
-    receipt_queued: bool = False
     simulated: bool = False
     message: str = ""
 
@@ -120,7 +110,6 @@ class ApplyOutcome:
             "needs_review": self.needs_review,
             "question": self.question,
             "ambiguities": list(self.ambiguities),
-            "receipt_queued": self.receipt_queued,
             "simulated": self.simulated,
             "message": self.message,
         }
@@ -139,7 +128,6 @@ class OrderPipeline:
         tenant: str,
         group: str,
         parse_service: Any,
-        outbox: ReceiptOutbox | None = None,
         settings: AutoOrderSettings | None = None,
         clock: Callable[[], float] = time.time,
         merger: Any = None,
@@ -149,7 +137,6 @@ class OrderPipeline:
         self.tenant = tenant
         self.group = group
         self.parse_service = parse_service
-        self.outbox = outbox
         self.settings = settings or AutoOrderSettings()
         self.merger = merger
         self.account_id = account_id
@@ -196,8 +183,6 @@ class OrderPipeline:
         message = self._message(message_id)
         if message is None:
             return self._finish(trace, "rejected", message="本地没有这条消息")
-        if self.outbox is not None and self.outbox.is_own_receipt(str(message["content"] or "")):
-            return self._finish(trace, "own_receipt", message="这是本软件自己发出的回执，已跳过")
 
         # 2) 本地上下文 → 网关任务 → 插件 → 结果。
         try:
@@ -234,7 +219,6 @@ class OrderPipeline:
         # 宁可标成演示，也不要让商户以为结果来自真实分析。
         simulated = not bool(getattr(self.parse_service, "model_executed", False))
         trace.model_executed = not simulated
-        receipt_queued = self._maybe_queue_receipt(order_id, source=source, simulated=simulated)
         message = settled.message or "已处理"
         if simulated:
             message += "（演示结果）"
@@ -243,82 +227,9 @@ class OrderPipeline:
             settled.state if hasattr(settled, "state") else "done",
             order_id=order_id,
             needs_review=bool(settled.needs_review),
-            receipt_queued=receipt_queued,
             simulated=simulated,
             message=message,
         )
-
-    # -------------------------------------------------------------- receipts
-
-    def _maybe_queue_receipt(self, order_id: str, *, source: str, simulated: bool) -> bool:
-        """落库之后才入队。顺序错了就会出现"没保存却说已记单"。"""
-        if self.outbox is None:
-            return False
-        if source in NO_RECEIPT_SOURCES:
-            return False
-        if not self.settings.sending_allowed:
-            return False
-        if simulated:
-            # 演示数据允许走完整流程以便演示，但会标明来源，不会混进真实经营数据。
-            pass
-        detail = self.orders.order_detail(self.tenant, order_id)
-        if not detail or not detail.get("items"):
-            return False
-        if detail.get("status") not in ("draft", "review", "cancel_review"):
-            # 已确认的订单不再发确认回执。
-            return False
-
-        priced, price_pending = self._items_for_receipt(detail)
-        if not priced and not price_pending:
-            # 缺价且不允许价格待定：转人工，不发一条没有金额的"已记单"。
-            return False
-        kind = receipt_kind_for(str(detail.get("change_type", "new")))
-        try:
-            text = build_receipt_text(
-                priced, delivery_date=str(detail.get("delivery_date") or ""),
-                price_pending=price_pending, kind=kind,
-            )
-        except ValueError:
-            return False
-        request = ReceiptRequest(
-            order_id=order_id,
-            order_version=int(detail.get("version", 1)),
-            conversation=self.group,
-            kind=kind,
-            text=text,
-            source=source,
-            price_pending=price_pending,
-            customer_name=str(detail.get("customer_name") or ""),
-        )
-        if not self.outbox.enqueue(request):
-            return False
-        for trace in self.traces:
-            if trace.order_id == order_id:
-                trace.receipt_key = request.idempotency_key
-        return True
-
-    def _items_for_receipt(self, detail: Mapping[str, Any]) -> tuple[list[dict[str, Any]], bool]:
-        """区分"没有价格"和"价格待定"。
-
-        两者都缺价，但只有后者允许发回执 —— 而且必须写明价格待定，不能显示零元。
-        """
-        priced: list[dict[str, Any]] = []
-        pending = False
-        for item in detail.get("items", ()):
-            price = int(item.get("unit_price_cents", 0) or 0)
-            entry = {
-                "name": str(item.get("product_name") or item.get("sku") or ""),
-                "quantity": item.get("quantity", 0),
-                "unit": str(item.get("unit") or ""),
-            }
-            if price > 0:
-                entry["unit_price_cents"] = price
-                priced.append(entry)
-            else:
-                pending = True
-        if pending and self.settings.allow_price_pending:
-            return priced, True
-        return priced, False
 
     # ------------------------------------------------------------ internals
 

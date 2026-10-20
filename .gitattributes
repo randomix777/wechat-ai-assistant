@@ -1,0 +1,4 @@
+# 批处理必须用 CRLF 结尾：cmd 读 LF 结尾的 .bat 时，chcp 65001 之后的含中文行
+# 会被截断成"命令"，启动脚本的 exe 名（微信AI智能助理.exe）正好会踩到，见 docs/release.md。
+*.bat text eol=crlf
+*.cmd text eol=crlf

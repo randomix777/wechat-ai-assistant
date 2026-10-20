@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from wechat_ai_assistant.application import MerchantApplication  # noqa: E402
 from wechat_ai_assistant.conversations import RealConversationSource  # noqa: E402
 from wechat_ai_assistant.merchant_app import _force_utf8_stdout  # noqa: E402
-from wechat_ai_assistant.merchant_ui import CELL_LIMIT, _cell  # noqa: E402
+from wechat_ai_assistant.merchant_text import CELL_LIMIT, cell as _cell  # noqa: E402
 from wechat_ai_assistant.orders import OrderStore  # noqa: E402
 from wechat_ai_assistant.WeChatAuto import Messages  # noqa: E402
 from wechat_ai_assistant.wechat_state import RealWeChatProbe  # noqa: E402

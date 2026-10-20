@@ -58,10 +58,14 @@ def data_dir() -> Path:
 
 
 def check_dependencies() -> list[tuple[str, str]]:
-    """返回缺失依赖的 ``(包名, 中文说明)``。空列表表示齐全。"""
+    """返回缺失依赖的 ``(包名, 中文说明)``。空列表表示齐全。
+
+    **tkinter 不在这张表里**：产品界面已经是 Web（``web_app``），Tk 只剩更新
+    闪屏那 3 秒，缺了也只是"换版时少一个提示"，不该拦住启动。
+    """
     required = [
-        ("tkinter", "图形界面组件"),
         ("sqlite3", "本地数据库"),
+        ("webview", "内嵌桌面窗口（WebView2）"),
         ("pywinauto", "微信窗口读取"),
         ("win32gui", "微信窗口操作"),
         ("psutil", "进程检测"),
@@ -80,20 +84,21 @@ def _show_update_splash(version: str) -> None:
 
     打包后没有控制台，print 等于没说。Tk 顶 3 秒，更新脚本接管后
     本进程退出，闪屏跟着消失。任何异常都静默跳过 —— 闪屏不能挡更新。
+
+    闪屏是"窗口还没起来"之前的兜底，所以它永远用 Tk（标准库），
+    不依赖界面那套。配色写在这里：主题模块只为 Tk 界面存在，已经删了。
     """
     try:
         import tkinter as tk
     except Exception:
         return
-    try:
-        from wechat_ai_assistant.ui_theme import APP_BG, BRAND, CARD_BG, FONT, INK
-    except Exception:  # 主题模块不可用时回退到内联色值，闪屏不能挡更新。
-        APP_BG, BRAND, CARD_BG, FONT, INK = "#f2f4f7", "#0e9f6e", "#ffffff", "Microsoft YaHei", "#1a1d21"
+    APP_BG, BRAND, CARD_BG, FONT, INK = (
+        "#f2f4f7", "#0e9f6e", "#ffffff", "Microsoft YaHei", "#1a1d21")
     root = None
     try:
         root = tk.Tk()
         try:  # 更新窗口也要是自家脸，不然看起来像个可疑弹窗。
-            from wechat_ai_assistant.ui_theme import set_window_icon
+            from wechat_ai_assistant.app_icon import set_window_icon
             set_window_icon(root)
         except Exception:
             pass
@@ -164,16 +169,22 @@ def _check_and_apply_update() -> bool:
 
 
 def _show_error_dialog(title: str, detail: str) -> None:
-    """窗口版没有控制台，报错只能弹窗 —— 否则商户看到的是「双击没反应」。"""
-    try:
-        import tkinter as tk
-        from tkinter import messagebox
+    """窗口版没有控制台，报错只能弹窗 —— 否则商户看到的是「双击没反应」。
 
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
-        messagebox.showerror(title, detail.strip())
-        root.destroy()
+    用 Win32 的 ``MessageBoxW``，**不用 tkinter**：产品界面已经是 Web，启动兜底
+    也只需要一句中文。``MB_TOPMOST | MB_SETFOREGROUND`` 是必须的 —— 弹窗藏在
+    别的窗口后面，等于没弹。任何异常都咽掉：报错本身不能再报错。
+    """
+    try:
+        import ctypes
+
+        MB_ICONERROR = 0x00000010
+        MB_TOPMOST = 0x00040000
+        MB_SETFOREGROUND = 0x00010000
+        ctypes.windll.user32.MessageBoxW(
+            None, str(detail or "").strip(), str(title or "微信AI智能助理"),
+            MB_ICONERROR | MB_TOPMOST | MB_SETFOREGROUND,
+        )
     except Exception:
         pass
 
@@ -209,10 +220,19 @@ def main(argv: list[str] | None = None) -> int:
 
     bootstrap_paths()
     # 启动路径上只做本地的事：有下好的新版就先换掉再打开。查新版、下包挪到
-    # 界面起来之后的后台线程（见 merchant_ui.MerchantWindow._start_update_check），
+    # 界面起来之后的后台线程（见 web_server.start_background_update_check），
     # 所以这里的失败或"没有新版"都不影响打开软件。
     try:
         args = list(argv if argv is not None else sys.argv[1:])
+        # 诊断模式：界面打不开时，商户**没有任何可点的东西**（日志入口在首页上，
+        # 而首页正是打不开的那一页）。这里不开界面，只把事实写成一份 txt 并打开，
+        # 商户直接发回来 —— 否则客服只能隔着电话猜。
+        if "--diagnose" in args:
+            from wechat_ai_assistant import window_diagnosis
+
+            path = window_diagnosis.write_and_open(data_dir=data_dir())
+            print(f"诊断报告：{path}")
+            return 0
         if "--check" not in args and _check_and_apply_update():
             return 0
     except Exception:
@@ -238,9 +258,12 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         # 按绝对模块名导入：本文件既可能被 ``python -m wechat_ai_assistant.launcher``
-        # 启动，也可能被 ``python path\\to\\launcher.py`` 直接执行。后者没有
+        # 启动，也可能被 ``python path\to\launcher.py`` 直接执行。后者没有
         # 包上下文，相对导入会失败。
-        from wechat_ai_assistant.merchant_app import main as app_main
+        #
+        # 界面是 Web 那套（``web_app``：本机 HTTP + 应用窗口）。业务逻辑在
+        # ``MerchantApplication`` 里，和界面无关 —— 换界面不动它。
+        from wechat_ai_assistant.web_app import main as app_main
     except Exception as exc:  # pragma: no cover - defensive
         return _fail("软件启动失败", f"{exc}\n\n请把这段信息发给客服。")
 
@@ -249,7 +272,21 @@ def main(argv: list[str] | None = None) -> int:
             args = ["--data-dir", str(data_dir())] + args
         except RuntimeError as exc:
             return _fail("便携数据迁移失败", str(exc))
-    return app_main(args)
+    try:
+        return app_main(args)
+    except Exception as exc:
+        # 走到这里说明**连兜底窗口都没起来**：内嵌 WebView2 失败会自动改用系统
+        # Edge，Edge 也没有才退到默认浏览器 —— 三条路全断才弹这句话。
+        from wechat_ai_assistant.web_window import WEBVIEW2_DOWNLOAD
+
+        return _fail(
+            "客户端窗口启动失败",
+            f"{exc}\n\n"
+            "这台电脑没能打开界面窗口。请先安装 WebView2 运行时（免费，微软官方）：\n"
+            f"{WEBVIEW2_DOWNLOAD}\n\n"
+            "本软件包里已带安装包，也可以直接双击安装后重试：\n"
+            "MicrosoftEdgeWebview2Setup.exe（在解压出来的文件夹里）。",
+        )
 
 
 if __name__ == "__main__":

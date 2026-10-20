@@ -16,7 +16,10 @@ MODULES = [
     "webui",
     "client_login",
     "local_parse",
-    "merchant_ui",
+    "web_server",
+    "web_app",
+    "merchant_text",
+    "app_icon",
     "merchant_app",
     "admin",
 ]

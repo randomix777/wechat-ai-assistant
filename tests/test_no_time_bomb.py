@@ -42,6 +42,20 @@ FIXED_CLOCK = re.compile(
     re.MULTILINE,
 )
 
+#: 写死的 unix 时间戳。同样的道理：``create_time = 1791900000`` 配上一个
+#: ``now - 7 天`` 的窗口，七天一到就掉出窗口。
+#:
+#: 2026-10-20 的第二次事故就是这个形状 —— `tests/test_wcdb.py` 把消息锚在
+#: 2026-10-13（1791900000），而读取窗口是相对时钟的七天。那条测试是 2026-10-13
+#: 写的，**七天后自己红了**，看上去像是"谁改坏了读取逻辑"。
+#:
+#: 这个模式只认**命名常量**（``SOMETHING = 1791900000``）：写死在函数体里的
+#: 时间戳多半只是消息内容里的一个字段（解析出来比大小的那种），不是窗口锚点。
+FIXED_EPOCH_ANCHOR = re.compile(
+    r"^([A-Z_][A-Z0-9_]*)\s*=\s*(1[5-9]\d{8}|20[0-3]\d{8})\b",
+    re.MULTILINE,
+)
+
 
 class NoTimeBombTests(unittest.TestCase):
     def test_the_known_bomb_is_defused(self):
@@ -79,6 +93,39 @@ class NoTimeBombTests(unittest.TestCase):
         for item in offenders:
             with self.subTest(file=item):
                 self.assertTrue(item)
+
+    def test_a_named_fixed_epoch_anchor_is_refused(self):
+        """写死的 unix 时间戳常量 + 相对窗口 = 定时炸弹，直接拒。
+
+        这条规则是 2026-10-20 加的，因为 `tests/test_wcdb.py` 就是这样红了的：
+        消息锚在写死的 1791900000（2026-10-13），读取窗口是 now - 7 天。
+        写测试那天它是绿的，**七天后自己红了**，而没有任何人改过读取逻辑。
+
+        锚点必须跟着真实时钟走 —— 见 `ClockIsIndependentTests` 那种写法。
+        """
+        relative = (
+            "start_delta=timedelta",
+            "datetime.now()",
+            "days=7",
+            "days=1",
+            'window("last_week")',
+            'window("last_day")',
+            "window('last_week')",
+        )
+        offenders: list[str] = []
+        for path in sorted(TESTS.glob("test_*.py")):
+            text = path.read_text(encoding="utf-8")
+            anchor = FIXED_EPOCH_ANCHOR.search(text)
+            if not anchor:
+                continue
+            if not any(token in text for token in relative):
+                continue
+            offenders.append(f"{path.name}（{anchor.group(1)} = {anchor.group(2)}）")
+        self.assertEqual(
+            offenders, [],
+            "写死的 unix 时间戳常量配上了相对窗口 —— 锚点必须跟着真实时钟走"
+            "（int(time.time()) - 3600 这类），否则过了窗口就会自己红",
+        )
 
 
 class ClockIsIndependentTests(unittest.TestCase):
@@ -125,6 +172,60 @@ class ClockIsIndependentTests(unittest.TestCase):
             f"{outside}/250 条消息落在窗口外 —— 真实时钟再往前走一点，"
             "这个测试就会开始失败",
         )
+
+    def test_the_wcdb_fixture_anchor_stays_close_to_the_real_clock(self):
+        """`test_wcdb` 的消息锚点也得跟着真实时钟走。
+
+        2026-10-20 的事故：那条测试是 2026-10-13 写的，锚点也是那天，
+        读取窗口又是相对的（now - 7 天），于是七天后它自己红了 —— 看上去
+        像"谁改坏了读取逻辑"，而实际上只是锚点过期了。
+        """
+        from tests import test_wcdb
+
+        drift = dt.datetime.now(dt.timezone.utc).timestamp() - test_wcdb.RECENT_TIMESTAMP
+        self.assertGreater(
+            drift, 0,
+            "锚点不能落在真实时钟之后 —— 那等于所有消息都还没到时间",
+        )
+        self.assertLess(
+            drift, 7200,  # 锚点是"60 分钟前"，留一倍余量
+            f"锚点离真实时钟 {drift:.0f} 秒（应当约 3600）。再远一点，"
+            "相对窗口的测试就会开始切掉开头的消息",
+        )
+
+    def test_the_wcdb_fixture_messages_stay_inside_the_window(self):
+        """fixture 写进去的消息时间必须就在刚才。
+
+        比"锚点常量跟着时钟"更硬一层：直接把 fixture 造出来的库打开，看它
+        写进去的 create_time 是不是就在眼前 —— 连"把时间戳又写死回去"这种
+        事也兜得住（2026-10-20 出的事就是这种）。
+        """
+        import hashlib
+        import sqlite3
+        import tempfile
+        from pathlib import Path
+
+        from tests import test_wcdb
+
+        with tempfile.TemporaryDirectory(prefix="pyw-timebomb-") as tmp:
+            message = Path(tmp) / "message.db"
+            test_wcdb._message_db(message, "g@chatroom")
+            con = sqlite3.connect(str(message))
+            try:
+                table = "Msg_" + hashlib.md5("g@chatroom".encode()).hexdigest()
+                stamps = [row[0] for row in con.execute(f"SELECT create_time FROM {table}")]
+            finally:
+                con.close()
+        self.assertTrue(stamps, "fixture 一条消息都没写进去 —— 这条守卫就是空的")
+        now = dt.datetime.now(dt.timezone.utc).timestamp()
+        for stamp in stamps:
+            # 锚点是 int(time.time()) - 3600（截断到秒），所以留 5 秒余量。
+            self.assertGreater(
+                stamp, now - 3600 - 5,
+                f"fixture 里的消息时间 {stamp} 已经不是最近一小时的了 —— "
+                "相对窗口（now - 7 天）迟早会把它切掉",
+            )
+            self.assertLessEqual(stamp, now + 60, "fixture 里的消息时间落在未来")
 
     def test_the_whole_file_reads_what_it_generates(self):
         from tests import test_history_read_modes as modes

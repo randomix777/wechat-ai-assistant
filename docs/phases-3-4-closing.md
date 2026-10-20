@@ -58,7 +58,7 @@
 
 ### 现有发送函数做了什么
 
-查了 `Messages.send_messages_to_friend()`（`WeChatAuto.py:3371`），它做三件事，
+查了 `Messages.send_messages_to_friend()`（`WeChatAuto.py:3371`；**2026-10-19 该函数已随发送能力一起删除**），它做三件事，
 **每一件都破坏用户正在输入的内容**：
 
 | 它做的 | 后果 |

@@ -104,9 +104,8 @@ TASKS = (TASK_ORDER_PARSE, TASK_SUMMARIZE)
 
 #: 摘要一次最多带的消息条数（和客户端 SUMMARY_MESSAGE_LIMIT 对齐）。
 MAX_SUMMARY_MESSAGES = 200
-#: 摘要正文上限与单次条数：唯一来源是 :mod:`wechat_ai_assistant.summary`
-#: （提示词和校验在同一处，改只改那里）。
-from .summary import SUMMARY_MAX_CHARS as MAX_SUMMARY_CHARS
+#: 摘要正文上限的唯一来源是 :mod:`wechat_ai_assistant.summary`
+#: （提示词和校验在同一处，改只改那里）—— 网关这里不再转手一份常量。
 DEFAULT_COST_MICRO_USD = 1
 #: Wall-clock ceiling for one parse job.
 #:
@@ -1183,7 +1182,7 @@ class ProductGateway:
     def _frozen_charge_micro_usd(
         self, job_id: str, snapshot: Mapping[str, Any], outcome: Any
     ) -> int:
-        """这个任务实��扣多少（单位：整数微美元）。
+        """这个任务实际扣多少（单位：整数微美元）。
 
         优先级：
 

@@ -134,7 +134,7 @@ def _describe_output() -> str:
     # 而契约要的是 new_order / append —— 单条字段对上，整份输出仍然作废。
     enum = props.get("intent", {}).get("enum") or INTENTS
     lines.append("")
-    lines.append('`intent` 只能从这��个值里选（用英文原文，不要翻译成中文）：')
+    lines.append('`intent` 只能从这几个值里选（用英文原文，不要翻译成中文）：')
     lines.append("  " + " / ".join(enum))
     return "\n".join(lines)
 

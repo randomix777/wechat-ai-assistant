@@ -110,6 +110,22 @@ class MessagesForSummaryTests(unittest.TestCase):
             self.app, types.SimpleNamespace(total_messages=0, coverage=[], import_ids=[]))
         self.assertEqual(got, [])
 
+    def test_the_first_read_takes_the_newest_batch(self):
+        """首次（没有水位线）取**最近**的一批，交给模型时按时间正序。
+
+        反转记录：这条路径以前是正序 + LIMIT，于是大群第一次跑活动助手拿到的是
+        **最旧**的 200 条 —— 报告讲几个月前的事，商户要看的"最近在聊什么"根本不在里面。
+        """
+        self._add("old", [("张姐", "很旧的一条", "text")])
+        self._add("new", [("李叔", "比较新的一条", "text"),
+                          ("王姨", "最新的一条", "text")])
+        with unittest.mock.patch.object(summary_task, "SUMMARY_MESSAGE_LIMIT", 2):
+            got = summary_task.messages_for_summary(
+                self.app, _result(self.store, self.tenant, total=3))
+        self.assertEqual([m["content"] for m in got],
+                         ["比较新的一条", "最新的一条"],
+                         "取最近的两条，且按时间正序交给模型")
+
     def test_the_order_is_chronological(self):
         """倒序取最近的那批，交给模型前要正回来。"""
         self._add("ordered", [("甲", "第一条", "text"), ("乙", "第二条", "text")])
@@ -461,6 +477,63 @@ class ReduceOverflowTests(unittest.TestCase):
                 self._EmptyClient(), "m", "", "g", ["a", "b"], {}, None, 8000)
 
 
+class JyiBatchMergeTests(unittest.TestCase):
+    """同一个会话分了多批时，两条通道要把它们**收成一份**。
+
+    回归的是一条"看起来能用、实际取决于走哪条通道"的不一致：网关那条路会
+    真的再调一次 AI 做合并（``run_batch("reduce", ...)``），而 JYI 直连那条
+    以前只是把「【分段 1/2】…【分段 2/2】…」拼起来 —— 同一个功能两种形状，
+    商户看到的报告是好是坏全看他连的是哪个通道。
+    """
+
+    class _BatchClient:
+        """每次调用换一句正文，好认出"第几次调用产出的"。"""
+
+        def __init__(self):
+            self.calls: list[str] = []
+
+        def text_model(self):
+            return "fake-text-model"
+
+        def chat_completions(self, model, messages, **kw):
+            self.calls.append(str(messages[0].get("content") or "")[:20])
+            index = len(self.calls)
+            return {"choices": [{"message": {"content": f"第 {index} 次调用产出"}}]}
+
+    def _run(self):
+        client = self._BatchClient()
+        messages = [{"id": "m1", "group_id": "鲜果群", "sender": "张姐",
+                     "content": "第一条", "sent_at": "2026-10-14 09:00", "kind": "text"}]
+        batches = [("纯文字", [messages[0]]), ("纯文字", [messages[0]])]
+        with unittest.mock.patch.object(summary_task, "_summary_work_batches",
+                                        return_value=batches):
+            outcome = summary_task._run_summary_jyi(
+                client, messages, role_id="activity", model_alias="fake-text-model")
+        return client, outcome
+
+    def test_two_batches_become_one_report(self):
+        client, outcome = self._run()
+        self.assertEqual(len(client.calls), 3, "两批 + 一次合并 = 3 次调用")
+        self.assertEqual(outcome["summary"], "第 3 次调用产出",
+                         "交给商户的是合并后的那份，不是两段拼起来的")
+        self.assertNotIn("【分段 1/2】", outcome["summary"])
+        self.assertEqual(len(outcome["group_reports"]), 1, "一个会话只有一份报告")
+        self.assertEqual(outcome["group_reports"][0]["report"], "第 3 次调用产出")
+        self.assertEqual(outcome["group_reports"][0]["group_label"], "鲜果群")
+
+    def test_the_single_batch_case_does_not_call_the_merger(self):
+        """只有一批时**不该**多花一次合并调用（钱要省在该省的地方）。"""
+        client = self._BatchClient()
+        messages = [{"id": "m1", "group_id": "鲜果群", "sender": "张姐",
+                     "content": "第一条", "sent_at": "2026-10-14 09:00", "kind": "text"}]
+        with unittest.mock.patch.object(summary_task, "_summary_work_batches",
+                                        return_value=[("纯文字", [messages[0]])]):
+            outcome = summary_task._run_summary_jyi(
+                client, messages, role_id="activity", model_alias="fake-text-model")
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(outcome["summary"], "第 1 次调用产出")
+
+
 class CancelAnalysisTests(unittest.TestCase):
     """分析必须能取消：已完成的分段保留，没开始的不花钱。
 
@@ -609,6 +682,24 @@ class WatermarkTests(unittest.TestCase):
         third = summary_task.messages_for_summary(self.app, result, role_id="r1")
         self.assertEqual(len(third), 0)
 
+    def test_the_import_batch_path_also_respects_the_role_watermark(self):
+        """旧结果对象那条路（只有 import_ids、没有 coverage）也必须按角色增量。
+
+        这条路真实读取走不到（import_ids 与 coverage 同轮写入），但它是公开入口，
+        手搓结果对象或将来加取数入口都可能落到这里 —— 不过滤就会同一个角色
+        每跑一次把同一批消息重发一遍、重新计费。
+        """
+        imported = self._add("one", [("张姐", "要两箱苹果", "text")])
+        result = _result(self.store, self.tenant, total=1, groups=(),
+                         import_ids=[imported["import_id"]])
+        first = summary_task.messages_for_summary(self.app, result, role_id="r1")
+        self.assertEqual(len(first), 1)
+        second = summary_task.messages_for_summary(self.app, result, role_id="r1")
+        self.assertEqual(second, [], "水位线之内不许再发一遍")
+        # 换角色照样拿得到全量（水位线按角色隔离）
+        other = summary_task.messages_for_summary(self.app, result, role_id="r2")
+        self.assertEqual(len(other), 1)
+
     def test_role_change_refetches_full(self):
         """换角色重新取全量，不受旧角色水位线影响。"""
         self._add("all", [("张姐", "要两箱苹果", "text")] * 2)
@@ -643,6 +734,96 @@ class WatermarkTests(unittest.TestCase):
         self.assertEqual(summary_task._get_report(self.store, self.tenant, "群A", "r2"), "")
         # 不同报告键不互相影响
         self.assertEqual(summary_task._get_report(self.store, self.tenant, "群B", "r1"), "")
+
+    def test_a_successful_role_run_persists_the_report(self):
+        """跑成功的角色报告**落盘** —— 重启之后「查看 AI 整理报告」和导出还要用它。"""
+        from wechat_ai_assistant.jyi_client import JYIClient
+
+        self._add("one", [("张姐", "要两箱苹果", "text")])
+        client = JYIClient()
+        client.session = types.SimpleNamespace(access_token="tok")
+        client.chat_completions = lambda model, messages, **kwargs: {
+            "choices": [{"message": {"content": "### 报名接龙\n- 张姐 +1"}}]}
+        app = types.SimpleNamespace(client=client, orders=self.store,
+                                    tenant=self.tenant, model_catalog={}, settings=None)
+        with unittest.mock.patch(
+                "wechat_ai_assistant.summary_task.messages_for_summary",
+                return_value=[{"sender": "张姐", "content": "要两箱苹果",
+                               "sent_at": "2026-10-14 09:00", "kind": "text",
+                               "id": "m1", "group_id": GROUP}]):
+            outcome = summary_task.run_summary(app, object(), role_id="activity")
+        self.assertIn("报名接龙", outcome.get("summary") or "", outcome)
+        stored = summary_task.load_role_report(self.store, self.tenant, "activity")
+        self.assertIsNotNone(stored, "跑成功必须落盘，否则重启就丢")
+        self.assertIn("张姐 +1", stored["summary"])
+        self.assertEqual(stored["total"], int(outcome.get("message_count") or 0))
+
+    def test_role_report_round_trip(self):
+        """角色报告：存一份能读回来；一个角色一份，最新覆盖旧的那份。
+
+        这是「关掉软件再打开，报告还在」的底层保证 —— 报告只放内存的话，
+        重启之后商户既看不到、重跑又因为水位线到头而报"没读到消息"。
+        """
+        self.assertIsNone(summary_task.load_role_report(self.store, self.tenant, "activity"),
+                          "没存过就是没有，不编一份空报告")
+        summary_task.save_role_report(self.store, self.tenant, "activity", "第一版", 3)
+        first = summary_task.load_role_report(self.store, self.tenant, "activity")
+        self.assertEqual(first["summary"], "第一版")
+        self.assertEqual(first["total"], 3)
+        summary_task.save_role_report(self.store, self.tenant, "activity", "第二版", 9)
+        again = summary_task.load_role_report(self.store, self.tenant, "activity")
+        self.assertEqual((again["summary"], again["total"]), ("第二版", 9),
+                         "同一个角色只留最新那份")
+        self.assertIsNone(summary_task.load_role_report(self.store, self.tenant, "generic"),
+                          "另一个角色不该被串上")
+        latest = summary_task.latest_role_report(self.store, self.tenant)
+        self.assertEqual(latest["role_id"], "activity")
+        # 空正文不算一份报告
+        summary_task.save_role_report(self.store, self.tenant, "generic", "   ", 4)
+        self.assertIsNone(summary_task.load_role_report(self.store, self.tenant, "generic"))
+
+    def test_the_per_conversation_reports_survive_a_restart(self):
+        """多选会话时，每个会话那一段也要落盘。
+
+        合并后的全文是「【会话A】…【会话B】…」拼起来的，读起来像一份报告；
+        ``groups`` 才是"每个会话各自说了什么"。不落盘的话重启后只能看到拼盘，
+        想单独看某个群就没法了。
+        """
+        summary_task.save_role_report(
+            self.store, self.tenant, "activity", "合并全文", 9,
+            groups=[{"group_label": "鲜果群", "report": "鲜果群的报告", "message_count": 4},
+                    {"group_label": "张老板", "report": "张老板的报告", "message_count": 5}])
+        stored = summary_task.load_role_report(self.store, self.tenant, "activity")
+        self.assertEqual([item["group_label"] for item in stored["groups"]],
+                         ["鲜果群", "张老板"],
+                         "分会话报告跟着报告一起读回来，且保持当时的分析顺序")
+        by_label = {item["group_label"]: item for item in stored["groups"]}
+        self.assertEqual(by_label["鲜果群"]["message_count"], 4)
+        self.assertEqual(by_label["张老板"]["report"], "张老板的报告")
+
+    def test_a_new_run_replaces_the_old_conversations(self):
+        """这次选的是别的会话，上一次的分报告必须整批换掉，不能留着。
+
+        留着的话，报告里会出现"这次到底分析了哪几个群"对不上的旧会话。
+        """
+        summary_task.save_role_report(
+            self.store, self.tenant, "activity", "第一版", 3,
+            groups=[{"group_label": "旧群", "report": "旧群的报告", "message_count": 3}])
+        summary_task.save_role_report(
+            self.store, self.tenant, "activity", "第二版", 2,
+            groups=[{"group_label": "新群", "report": "新群的报告", "message_count": 2}])
+        stored = summary_task.load_role_report(self.store, self.tenant, "activity")
+        self.assertEqual([item["group_label"] for item in stored["groups"]], ["新群"])
+
+    def test_no_conversations_keeps_whatever_was_there(self):
+        """这次没带分报告（比如旧调用方），不许把上一次的清成空。"""
+        summary_task.save_role_report(
+            self.store, self.tenant, "activity", "第一版", 3,
+            groups=[{"group_label": "鲜果群", "report": "鲜果群的报告", "message_count": 3}])
+        summary_task.save_role_report(self.store, self.tenant, "activity", "第二版", 5)
+        stored = summary_task.load_role_report(self.store, self.tenant, "activity")
+        self.assertEqual(stored["summary"], "第二版")
+        self.assertEqual([item["group_label"] for item in stored["groups"]], ["鲜果群"])
 
 
 class GatewayErrorTextTests(unittest.TestCase):

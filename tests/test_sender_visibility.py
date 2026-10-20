@@ -103,12 +103,22 @@ class CoverageCarriesTheSignalTests(unittest.TestCase):
 
     def test_both_interfaces_show_it(self):
         """\u53ea\u5199\u8fdb\u5e93\u4e0d\u7b49\u4e8e\u8bf4\u51fa\u6765 \u2014\u2014 \u5546\u6237\u770b\u7684\u662f\u754c\u9762\u3002"""
-        ui = (ROOT / "src/wechat_ai_assistant/merchant_ui.py").read_text(encoding="utf-8")
-        web = (ROOT / "src/wechat_ai_assistant/web_dev.py").read_text(encoding="utf-8")
-        page = (ROOT / "src/wechat_ai_assistant/web_page.py").read_text(encoding="utf-8")
-        self.assertIn("unresolved_senders", ui, "Tk \u754c\u9762\u6ca1\u663e\u793a")
-        self.assertIn('"unresolved"', web, "Web \u7aef\u70b9\u6ca1\u4f20\u8fd9\u4e2a\u503c")
-        self.assertIn("row.unresolved", page, "Web \u9875\u9762\u6ca1\u663e\u793a")
+        # Web \u7aef\u65ad\u8a00 **\u6570\u636e\u5951\u7ea6**\uff1a\u8bfb\u53d6\u7ed3\u679c\u89c6\u56fe\u5fc5\u987b\u628a\u201c\u591a\u5c11\u6761\u53d1\u9001\u4eba\u6ca1\u8ba4\u51fa\u6765\u201d\u7ed9\u51fa\u6765\uff0c
+        # \u9875\u9762\u624d\u6709\u4e1c\u897f\u53ef\u663e\u793a\u3002\u6309\u6587\u4ef6\u540d\u627e\u6e90\u7801\u7684\u5199\u6cd5\u4e00\u91cd\u6784\u5c31\u7ea2 \u2014\u2014 \u8fd9\u91cc\u6539\u6210\u8c03\u51fd\u6570\u3002
+        from types import SimpleNamespace
+
+        from wechat_ai_assistant import web_server
+
+        item = SimpleNamespace(
+            conversation=SimpleNamespace(name="\u9c9c\u679c\u6279\u53d1\u7fa4", kind="group"),
+            message_count=3, truncated=False, unresolved_senders=2,
+            fetched_count=3, skipped=False, error="",
+        )
+        result = SimpleNamespace(total_messages=3, mode="all", coverage=[item],
+                                 import_ids=[], headline=lambda: "all")
+        view = web_server._history_view(result)
+        self.assertEqual(view["coverage"][0]["unresolved"], 2,
+                         "Web \u7aef\u70b9\u6ca1\u628a\u8fd9\u4e2a\u503c\u4f20\u51fa\u53bb\uff0c\u9875\u9762\u5c31\u6ca1\u6cd5\u663e\u793a")
 
 
 if __name__ == "__main__":

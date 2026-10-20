@@ -6,7 +6,7 @@ OpenRouter 和 DeepSeek 都是 OpenAI 兼容接口，**传输层几乎一样**�
 适配器最容易出的错不是连不上，而是**说了假话还看不出来**：
 
 * 计费记到 ``deepseek`` 名下 —— 运营看报表时完全发现不了；
-* 把 DeepSeek 的模型清单当成 OpenRouter 的可��模型 —— 界面上会出现
+* 把 DeepSeek 的模型清单当成 OpenRouter 的可用模型 —— 界面上会出现
   根本没在 OpenRouter 开过的模型名；
 * 套用 DeepSeek 的下线名单去判断 OpenRouter 的模型 —— 运营会去处理一个
   不存在的问题。

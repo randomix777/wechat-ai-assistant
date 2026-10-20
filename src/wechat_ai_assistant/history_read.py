@@ -6,8 +6,9 @@
 "最近 7 天"而实际只读到 3 天，界面必须说"实际读到 X 至 Y"，不能显示"已读取
 最近 7 天"。本模块因此把**请求范围**和**实际覆盖范围**分成两个字段。
 
-**2. 并发抢键鼠。** 读取历史要操作微信窗口。如果同时在发回执或监听，两者会
-互相打断，甚至把文字发进错误的会话。所有涉及键鼠的操作都经过同一个串行队列。
+**2. 并发抢键鼠。** 读历史本身只解密数据库副本、不碰微信窗口，但**发回执要点
+窗口**。两者共用同一个串行队列，免得读到一半被一次发送抢走焦点，甚至把文字发进
+错误的会话。
 
 **3. 假进度。** 进度按**已处理会话数**推进，不用假动画。
 """
@@ -29,10 +30,30 @@ from .wechat_time import parse_timestamp
 
 LOGGER = logging.getLogger(__name__)
 
-#: 群发送人/历史从哪来。members=界面名单（上游原设计），
-#: avatar=逐条点头像（慢、抢焦点），localdb=内存 carve，
-#: wcdb=解密本地库直读（最快最全，要先提取密钥）。
-SENDER_SOURCES = ("members", "avatar", "localdb", "wcdb")
+#: 历史消息从哪来。``members`` = 注入的读取器（测试替身/外部集成，
+#: 群成员名单跟着一起递下去）；``wcdb`` = 解密本地库直读（**生产唯一的路**，
+#: 要先提取密钥）。
+#:
+#: ``localdb``/``avatar`` 是**已退役**的旧名（内存 carve / 逐条点头像）：
+#: 内存 carve 会对每个会话扫描微信进程的大块地址空间，读取延迟不可预测，
+#: 这条路连同"读不到就静默回落"一起关掉了。旧名仍认（老配置不会因为改名
+#: 突然读不了），但一律按解密库走。
+SENDER_SOURCES = ("members", "wcdb", "localdb", "avatar")
+
+#: 退役旧名 → 现在实际走的路。
+RETIRED_SENDER_SOURCES = {"localdb": "wcdb", "avatar": "wcdb"}
+
+
+def normalize_sender_source(value: str) -> str:
+    """把来源名收敛成现在真有的两条路：``members`` / ``wcdb``。
+
+    认不出来的值按生产默认（解密库）走 —— 静默换成一条**不存在**的路
+    （以前是"一律按 localdb"）会让调用方以为自己在走内存 carve，实际早就没有了。
+    """
+    name = str(value or "").strip().lower()
+    if name in ("members", "wcdb"):
+        return name
+    return RETIRED_SENDER_SOURCES.get(name, "wcdb")
 
 #: 单个会话一次读取的默认条数上限。界面可在"高级"里调小或调大。
 DEFAULT_MAX_MESSAGES = 200
@@ -409,8 +430,8 @@ class HistoryCursor:
 class HistoryReader:
     """串行读取多个会话的历史，支持进度、取消和恢复。
 
-    ``reader`` 是注入的单会话读取函数（测试替身用），生产里走
-    解密库/内存两条路，不碰微信窗口。
+    ``reader`` 是注入的单会话读取函数（测试替身用），生产里走解密库一条路
+    （先提取密钥），不碰微信窗口。
     """
 
     def __init__(
@@ -420,7 +441,7 @@ class HistoryReader:
         cursor: HistoryCursor | None = None,
         clock: Callable[[], float] = time.time,
         group_members: Callable[[Any], Sequence[str]] | None = None,
-        sender_source: str = "localdb",
+        sender_source: str = "wcdb",
         wcdb_reader_fn: Callable[[], Any] | None = None,
     ):
         self._reader = reader
@@ -434,12 +455,10 @@ class HistoryReader:
         #: 给群聊取成员昵称列表。取到了读取器就能**直接认出发送人**；
         #: 取不到只能靠两次遍历反推，而对不上时发送人会变成占位串。
         self._group_members = group_members
-        #: 群发送人从哪来。默认 "localdb"（内存 carve，不碰窗口）；
-        #: "wcdb" 是解密本地库直读（要先提取密钥，全量）；
-        #: "members" 只剩"注入的读取器"含义（测试替身用），生产里默认
-        #: 读者遇到会明说界面链已移除；"avatar" 已移除，按 localdb 走。
-        #: 其它值一律按 localdb。
-        self._sender_source = sender_source if sender_source in SENDER_SOURCES else "localdb"
+        #: 历史消息从哪来。生产默认 ``wcdb``（解密本地库直读，要先提取密钥）；
+        #: ``members`` 只剩"注入的读取器"含义（测试替身/外部集成）。
+        #: ``localdb``/``avatar`` 是退役旧名，按解密库走（见 SENDER_SOURCES）。
+        self._sender_source = normalize_sender_source(sender_source)
         #: 解密库来源（应用层注入，有钥匙才有）。按次准备、整轮复用、读完即删。
         self._wcdb_reader_fn = wcdb_reader_fn
         self._wcdb_reader: Any = None
@@ -529,12 +548,12 @@ class HistoryReader:
         """同步读取。逐个会话串行，随时可取消。
 
         ``mode`` 是商户选的读法，见 :class:`ReadMode`。
-        ``sender_source`` 本次认人方式（members/avatar/localdb/wcdb），空用构造默认值。
+        ``sender_source`` 本次认人方式（members/wcdb），空用构造默认值。
+        退役旧名 localdb/avatar 也认，一律按 wcdb 走（见 ``SENDER_SOURCES``）。
         members 在有钥匙时自动升级 wcdb（解密库直读，不碰界面）。
         """
         if mode not in ReadMode.ALL_KINDS:
             raise ValueError(f"unknown read mode: {mode}")
-        now = datetime.now(timezone.utc)
         now = datetime.now(timezone.utc)
         result = HistoryResult(window=window, mode=mode)
         total = len(conversations)
@@ -760,12 +779,11 @@ class HistoryReader:
     ) -> list[dict[str, Any]]:
         # 不把 since 传给 reader：各测试替身没有这个参数，
         # 「只要上次之后的消息」在 read() 里过滤，不要去改底层签名。
-        # 解密库不分群聊私聊：库里都有，直接走。members 默认在有钥匙时自动升级。
-        # 界面链已移除：avatar（逐条点头像，又慢又抢焦点）不再存在，
-        # 传 avatar 按 localdb 走；members 只剩"注入的读取器"含义
-        # （测试替身用），生产里默认读者会明说界面链已移除。
-        source = sender_source if sender_source in SENDER_SOURCES else self._sender_source
-        if source == "wcdb" or (source == "members" and self._wcdb_usable()):
+        # 生产只有解密库一条路（见 SENDER_SOURCES 的说明）：内存 carve 已退役，
+        # 数据库不可用时**明确报错**，让商户去点「重新提取密钥」，不静默回落。
+        requested = str(sender_source or "").strip()
+        source = normalize_sender_source(requested) if requested else self._sender_source
+        if self._wcdb_usable():
             try:
                 return self._read_via_wcdb(conversation, max_messages, on_progress)
             except Exception as exc:
@@ -775,18 +793,20 @@ class HistoryReader:
                     # 库是好的，只是这个会话本地没存消息：不回落（回落也读不到），
                     # 把指引原样抛给上游记 error 覆盖，界面照着显示。
                     raise
-                LOGGER.debug("wcdb 历史不可用，回落内存路：%s", exc)
+                LOGGER.warning("解密数据库读取失败；不回退内存扫描：%s", exc)
                 self._wcdb_dead = True
-        # 群聊只剩内存路；私聊没有内存形态，只能走解密库，没钥匙就报清楚。
-        source = sender_source if sender_source in SENDER_SOURCES else self._sender_source
-        if getattr(conversation, "kind", "") == "group":
-            if source in ("avatar", "localdb"):
-                return self._read_via_localdb(conversation, max_messages, on_progress)
-        elif source in ("avatar", "localdb", "members") or not self._wcdb_usable():
-            raise RuntimeError("私聊只有解密库能读：先点「重新提取密钥」，提完再读")
-        # members + 注入读取器（测试替身）：群成员昵称一起传下去做直接解析，
-        # 不依赖两次遍历对比反推发送人。
-        return self._read_via_members(conversation, max_messages, on_progress)
+                raise RuntimeError(
+                    "解密数据库读取失败，请检查数据库密钥后重试。"
+                ) from exc
+        if source == "members":
+            if getattr(conversation, "kind", "") != "group":
+                raise RuntimeError("私聊只能从解密数据库读取；请先重新提取密钥后重试。")
+            # members + 注入读取器（测试替身）：群成员昵称一起传下去做直接解析，
+            # 不依赖两次遍历对比反推发送人。生产默认源不走这条旧界面链。
+            return self._read_via_members(conversation, max_messages, on_progress)
+        raise RuntimeError(
+            "解密数据库不可用，请先点「重新提取密钥」后重试。"
+        )
 
     def _wcdb_usable(self) -> bool:
         """解密库这条路现在通不通。只做轻量判断（钥匙+文件在不在），
@@ -886,85 +906,17 @@ class HistoryReader:
                     pass
         return out
 
-    def _read_via_localdb(
-        self,
-        conversation: Conversation,
-        max_messages: int,
-        on_progress: Callable[[int], None] | None = None,
-    ) -> list[dict[str, Any]]:
-        """群聊内存模式：备注名解群 wxid → 直接捡内存里的记录，不碰微信窗口。
-
-        内存里只有微信最近碰过的数据：没进内存的群解不出 wxid，
-        之前攒的消息也捡不全 —— 这是内存路的硬边界，不是 bug。
-        wxid 解不出就明说（让商户先在微信里打开一次该群，或提密钥走解密库），
-        不再悄悄回落界面链。发送人先解备注名，解不出直接写 wxid
-        （能归属，不断链）；同一次读取内记住解过的，几百条不用扫几百遍。
-        """
-        from . import localdb
-
-        # 名单里已经带 wxid（第 2 步按名找回的群）就直接用，不再按名反查：
-        # 反查是投票制的，重名/转发提到群名时可能投出另一个群，串群读错。
-        wxid = str(getattr(conversation, "wxid", "") or "")
-        if not wxid:
-            wxid = localdb.resolve_group_wxid(conversation.name) or ""
-        if not wxid:
-            raise RuntimeError(
-                f"内存里找不到「{conversation.name}」：先在微信里打开一次"
-                "这个群再读，或点「重新提取密钥」走解密库全量读")
-        out: list[dict[str, Any]] = []
-        try:
-            messages = localdb.read_conversation(wxid, limit=max_messages)
-        except Exception as exc:
-            raise RuntimeError(f"内存读取失败（{exc}）：提密钥走解密库可全量读")
-        resolved: dict[str, str] = {}
-        for message in messages:
-            sender = ""
-            if message.sender_wxid:
-                if message.sender_wxid not in resolved:
-                    try:
-                        resolved[message.sender_wxid] = localdb.resolve_contact_name(
-                            message.sender_wxid)
-                    except Exception:
-                        resolved[message.sender_wxid] = ""
-                sender = resolved[message.sender_wxid]
-            sent_at = ""
-            if message.timestamp:
-                try:
-                    from datetime import datetime
-                    sent_at = datetime.fromtimestamp(message.timestamp).astimezone().strftime(
-                        "%Y-%m-%d %H:%M")
-                except Exception:
-                    sent_at = ""
-            # 稳定来源 ID：同一条（群+内容+时间）永远同一个，重读不翻倍。
-            # 故意不带发送人 —— 发送人后认出来了，同一条才能合到一起升级，
-            # 而不是名字一变就多一条。
-            import hashlib
-            stable_id = "localdb-" + hashlib.sha256(
-                f"{conversation.name}|{message.content}|{sent_at}".encode("utf-8")).hexdigest()[:20]
-            out.append({
-                "消息发送人": sender or message.sender_wxid or conversation.name,
-                "消息内容": message.content,
-                "消息类型": message.kind or "文本",
-                "消息发送时间": sent_at,
-                "来源": "localdb",
-                "source_id": stable_id,
-                "stable_source_id": True,
-                "media": message.media,
-            })
-            if on_progress is not None:
-                try:
-                    on_progress(len(out))
-                except Exception:
-                    pass
-        return out
-
     def _read_via_members(
         self,
         conversation: Conversation,
         max_messages: int,
         on_progress: Callable[[int], None] | None = None,
     ) -> list[dict[str, Any]]:
-        """成员名单老链路（localdb 回落用，也是默认行为）。"""
+        """注入读取器（测试替身/外部集成）那条路：群成员名单一起递下去做直接解析。
+
+        生产默认走解密库（见 ``SENDER_SOURCES``）；这条只在调用方显式传了
+        members、或注入了读取器时走，不碰微信窗口。
+        """
         members = self._members_for(conversation)
         kwargs = dict(
             friend=conversation.name,

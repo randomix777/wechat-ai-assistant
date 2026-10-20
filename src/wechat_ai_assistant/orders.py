@@ -982,7 +982,13 @@ class OrderStore:
         self._plan(tenant)
         created = updated = skipped = 0
         problems: list[str] = []
-        for index, row in enumerate(rows, 1):
+        for index, row in enumerate(rows, 2):
+            # 有「行号」列就用它（那是商户表格里的真实行号）；纯 CSV 没有这列，
+            # 退回按顺序数（表头算第 1 行）。
+            try:
+                index = int(str(row.get("行号") or "").strip() or index)
+            except (TypeError, ValueError):
+                pass
             name = str(row.get("name") or row.get("\u540d\u5b57") or row.get("\u5ba2\u6237")
                        or row.get("\u79f0\u547c") or "").strip()
             if not name:
@@ -1072,11 +1078,19 @@ class OrderStore:
 
         不抛异常。一行看不懂就记在 skipped 里并说明原因，
         其余的照常导入—— 一个脏单元格不应让整批失败。
+
+        报的行号是**表格里的行号**（表头算第 1 行），商户对着 Excel 就能找到。
         """
         self._plan(tenant)
         created = updated = skipped = 0
         problems: list[str] = []
-        for index, row in enumerate(rows, 1):
+        for index, row in enumerate(rows, 2):
+            # 有「行号」列就用它（那是商户表格里的真实行号）；纯 CSV 没有这列，
+            # 退回按顺序数（表头算第 1 行）。
+            try:
+                index = int(str(row.get("行号") or "").strip() or index)
+            except (TypeError, ValueError):
+                pass
             sku = str(row.get("sku") or row.get("编码") or "").strip()
             name = str(row.get("name") or row.get("名称") or row.get("商品") or "").strip()
             unit = str(row.get("unit") or row.get("单位") or "").strip()

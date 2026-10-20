@@ -18,13 +18,63 @@
 Copy-Item deploy\portable.flag dist\微信AI智能助理\portable.flag -Force
 Copy-Item deploy\portable-readme.txt dist\微信AI智能助理\先看我-免安装版.txt -Force
 Copy-Item deploy\启动微信AI智能助理.bat dist\微信AI智能助理\启动微信AI智能助理.bat -Force
+# 界面打不开时的诊断入口（跑 exe --diagnose，把报告用记事本打开让商户发回来）
+Copy-Item deploy\诊断-发给客服.bat dist\微信AI智能助理\诊断-发给客服.bat -Force
 ```
 
 产物：`dist/微信AI智能助理/`（启动脚本、中文说明、`微信AI智能助理.exe`、`_internal/` 和便携标记）。
 **不要发 onefile**：pywinauto/pywin32 的原生 DLL 在 onefile 下每次启动
 都要解包，又慢又容易被杀软误报（见 `deploy/merchant.spec` 头注）。
 
+客户端窗口由 pywebview 承载，Windows 渲染器固定为 WebView2（Chromium）。
+便携包包含 pywebview 和 Python/.NET 桥接依赖；目标电脑还需要 Microsoft Edge
+WebView2 Runtime。Windows 11 通常已预装；较旧 Windows 设备缺少 Runtime 时：
+
+0. **开窗之前先装**（`web_window.ensure_webview_runtime`）。Electron 是自带内核、
+   Tauri 是安装器先装 WebView2 —— 我们只能在启动时补这一步，但顺序必须是"先装再开窗"，
+   否则第一轮永远是降级体验。装不上才退兜底。
+1. 客户端**现场下载**微软官方的引导安装包并静默安装（`/silent /install`，
+   约 1.8 MB + 运行时约 100 MB，需要联网）。下载经过三重把关：官方跳转地址
+   （HTTPS）、大小与 PE 头像不像安装程序、Authenticode 签名是否可信
+   （`web_window.download_webview2_installer` / `signature_is_trusted`）；
+   装完再查注册表确认，**安装器的退出码不算数**（断网时它也会"跑完"）。
+   **普通权限装不上就再走一次 UAC 提权**（`_run_installer_elevated`）：写机器级目录
+   必须有管理员权限，这正是"做了依赖却没装上"的常见原因。
+2. 同一个进程里装完不会立刻生效（pywebview 的渲染器在导入时就定了），所以这一轮
+   仍然**先用系统 Edge `--app` 把界面开出来**，界面顶栏写明这件事；下次启动回到内嵌窗口。
+3. 连 Edge 都没有才退到默认浏览器（那条路会一直挂着进程，日志里写明）。
+
+三条路全断才会弹「客户端窗口启动失败」。不会退回旧版 MSHTML —— 那是 IE 兼容模式，
+界面会花。
+
+> **兜底窗口的两个硬规矩**（线上事故换来的，别改回去）：
+> ① `--user-data-dir` 每次启动都不同（`wechat-ai-assistant-ui-<pid>`）。用固定目录时，
+> 上一次的 Edge 还占着它，新启动的 `msedge.exe` 会把窗口交给已在跑的浏览器进程然后
+> **立刻退出**（实测 0.3 秒），我们等的是这个启动器，于是误判"窗口关了"把服务一关 ——
+> 商户看到的就是「127.0.0.1 页面不可用」。
+> ② 启动器退出 ≠ 窗口关了：要接着看"我们的 profile 还有没有浏览器在用"；连一个都
+> 找不到时**宁可继续挂着**（日志写明），也不能把服务关掉。
+> ③ 开窗之前先 `wait_until_serving`，服务不应答就不开窗，直接报错（带日志路径）。
+>
+> **本机回环一律不走代理。** 装了 Clash / 公司代理的机器上，`urllib` 和浏览器都会把
+> `127.0.0.1` 送进代理（`proxy_bypass('127.0.0.1')` 默认是 False），表现为"页面不可用"，
+> 而命令行 curl 常常自己跳过回环、看起来一切正常。所以：探测用 `loopback_opener()`；
+> Edge 兜底加 `--no-proxy-server`；内嵌走 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--no-proxy-server`。
+
+**便携包里不带安装包**（`deploy/merchant.spec` 只管图标）。刻意如此：多一个二进制
+不如让缺组件的那台机器自己取。装在**没有外网**的客户机器上时，请手工安装一次
+Runtime（管理员权限，装一次永久有效）：[Evergreen WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)，
+或取离线独立包（约 130 MB）`https://go.microsoft.com/fwlink/?linkid=2124701` 双击安装。
+
 用户右键 ZIP 选择“全部解压”，再双击“启动微信AI智能助理.bat”，不需要安装程序。
+**直接双击 `微信AI智能助理.exe` 也一样**（数据目录按 exe 自己的位置算，与工作目录无关；
+升级流程也是直接起 exe，见 `updater.build_updater_script`）。bat 只剩两个作用：把工作目录
+切到程序目录、透传参数（`--page dev` 之类）。所以它**不是**唯一入口，删掉也不会影响启动 ——
+只是商户手册和客服话术都指着它，暂时留着更省事。
+启动脚本里**必须**用 `start "" "微信AI智能助理.exe"`，不能直接写 `"微信AI智能助理.exe"`：
+后者会让 cmd 一直等窗口版 exe 退出，黑框从头挂到尾（exe 本身已经是 `console=False`）。
+.bat **必须是 CRLF 换行**（`.gitattributes` 里 `*.bat eol=crlf` 钉住了）：cmd 读 LF 结尾的
+批处理时，`chcp 65001` 之后的含中文行会被截断成"命令"，exe 名正好是中文，启动直接失败。
 便携版的数据保存在同级 `data/`，复制整个文件夹即可备份或迁移。自动更新会保留该目录。
 请解压到普通可写目录；Windows 加密的登录凭证换电脑后需要重新登录。
 
@@ -32,9 +82,9 @@ Copy-Item deploy\启动微信AI智能助理.bat dist\微信AI智能助理\启动
 
 `deploy/assets/app.ico`（多尺寸）与 `app.png` 由 `deploy/build_icon.py` **自己画**：
 按 4 倍超采样出图再降采样，所以 Windows 真正会用的 16/24/32 px 不糊；
-配色取自界面主题（`ui_theme.BRAND` 品牌绿、`INK` 深墨），和软件是同一套颜色。
+配色取自界面本体（`#0e9f6e` 品牌绿、`#1b2430` 深墨），和界面是同一套颜色。
 `deploy/merchant.spec` 里 `icon=` 把它写进 exe 资源（任务栏 / Alt-Tab / 文件图标），
-`datas` 把它随包分发，运行时的窗口图标由 `ui_theme.set_window_icon` 读。
+`datas` 把它随包分发，运行时的窗口图标由 `app_icon.set_window_icon` 读（更新闪屏还在用它）。
 
 ```powershell
 .\.venv\Scripts\python.exe deploy\build_icon.py             # 出三个方向 + 桌面尺寸预览
@@ -44,7 +94,15 @@ Copy-Item deploy\启动微信AI智能助理.bat dist\微信AI智能助理\启动
 方向在 `build_icon.py` 的 `DIRECTIONS` 里，加一个函数就是一个新方向。
 
 发版前冒烟：双击 `dist/微信AI智能助理/微信AI智能助理.exe`，
-走一遍"登录 → 选群 → 读历史"，标题栏版本号对得上才算数。
+走一遍"登录 → 选群 → 读历史"，**顶栏那个版本号**（`v1.11.0` 这种）和这次发的号对得上才算数。
+（版本号由 `version.py` 一处给出，`/api/state` 的 `version` 字段带到界面顶栏。）
+
+> **冒烟必须看界面真的出来，不能只看 `/api/state` 通。** 页面模块是按名字动态加载的
+> （`web_server._PAGE_MODULES` → `import_module`），PyInstaller 静态分析看不见它们 ——
+> 1.11.0～1.11.7 的包里就漏了这两个模块：`/api/state` 正常，但 `/wizard` 抛
+> `ModuleNotFoundError`，HTTP 处理器异常退出、连接直接关闭，客户看到的是
+> `ERR_EMPTY_RESPONSE`（"empty response"）。源码运行完全正常，所以这个问题躲了好几版。
+> `tests/test_packaging_spec.py` 现在会静态核对 hiddenimports，别绕过它。
 
 ## 3. 生成便携 ZIP（文件名是约定，错一个字客户端就认不出）
 
@@ -90,10 +148,10 @@ Compress-Archive -Path "dist\微信AI智能助理" `
 
 ### 4.1 私钥只存在 worker 里（在线签名服务）
 
-不想让私钥留在发版机器上时，把它交给 JYI 平台 worker（`apps/platform` 的
-`app/api/internal/release/sign/route.ts`，两个 secret：`RELEASE_SIGN_JWK` = 私钥的 JWK，
-`RELEASE_SIGN_TOKEN` = 进门口令）。签名路由挂在有域名的 worker 上（`jyisolutions.com`），
-不在根 `jyi` worker 里——根 worker 没有 route，挂上去也没人访问得到。
+不想让私钥留在发版机器上时，把它交给 AI 平台 worker（仓库根目录的
+`worker/release-sign.ts` 由 `apps/ai-platform` 挂载，两个 secret：`RELEASE_SIGN_JWK` = 私钥的 JWK，
+`RELEASE_SIGN_TOKEN` = 进门口令）。签名路由挂在 `ai.jyisolutions.com`，由该 worker
+提供 `POST /api/internal/release/sign`；客户端只拿内置公钥验签，私钥不进安装包。
 
 ```powershell
 # 一次性：把私钥转成 WebCrypto 的 JWK 喂给平台 worker（在拿到私钥的那台机器上跑一次）
@@ -103,7 +161,7 @@ Compress-Archive -Path "dist\微信AI智能助理" `
 # 每次发版：清单仍在本机生成，只把清单字节发给签名路由，签名拿回来本机先验一遍
 $env:RELEASE_SIGN_TOKEN = "<自己生成的长随机串>"
 .\.venv\Scripts\python.exe deploy\sign_release.py sign "微信AI智能助理-win64-$ver.zip" `
-  --version $ver --remote https://jyisolutions.com/api/internal/release/sign
+  --version $ver --remote https://ai.jyisolutions.com/api/internal/release/sign
 ```
 
 * 信任根没变：客户端认的还是源码里钉死的 `PUBLISHER_PUBKEY`。签名服务自称的公钥与它不一致、
@@ -116,14 +174,15 @@ $env:RELEASE_SIGN_TOKEN = "<自己生成的长随机串>"
 ## 5. 发布到 JYI 工具中心（主渠道）
 
 工具中心是主渠道：国内直连、没有匿名限流，而且清单和签名跟包放在同一个地方。
-**这个工具必须设成「免费」**——客户端用的是产品自己的 JYI 凭据（`jyi_client.py` 那套
-`api_key`/`device_token`），不是平台 OAuth，取不到「需授权」工具的下载。
+工具可以保留「需授权」。桌面客户端用现有 JYI 连接凭据向 `ai.jyisolutions.com`
+换取仅用于工具中心的 120 秒短时 Bearer token；原始设备令牌不会发给工具中心。
+工具中心再把已验证邮箱映射到 JYI 用户，并对每次更新检查和下载执行现有审批授权校验。
 
 1. 管理后台 → 工具 → 微信 AI 助手 → 上传新版本：填版本号、上传 `微信AI智能助理-win64-<版本>.zip`；
 2. 同一版的两个字段里粘上签名（就是 `sign` 命令产出的那两个文件的内容）：
    * **签名清单** = `dist\latest.json`
    * **签名** = `dist\latest.json.sig`
-3. 把工具设成「免费」，确认 `downloadsPaused` 是关的。
+3. 保留「需授权」，确认已授权账号能使用客户端更新，并确认 `downloadsPaused` 是关的。
 
 客户端只看**清单里**的 `zip_url`/`sha256`：清单验过就用清单里的下载地址，清单里的哈希对不上
 就当作没更新（工具中心换版不用重签，地址是稳定的；但**每次换包都必须重签一次清单**，

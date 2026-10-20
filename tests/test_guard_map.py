@@ -79,11 +79,16 @@ class MapKeepsUpTests(unittest.TestCase):
         self.assertTrue(script.is_file())
         self.assertIn("if __name__", script.read_text(encoding="utf-8"))
 
-    def test_it_scans_both_unit_tests_and_the_ui_check(self):
+    def test_it_scans_the_unit_tests(self):
+        """只扫单测：界面已经统一到 Web，原来的 Tk 界面检查脚本跟着删了。
+
+        护栏本身仍然是"断言名 ↔ 症状"的对照，所以扫单测就够；
+        新增界面断言时直接在 ``tests/`` 里写，map 自动能看到。
+        """
         script = (ROOT / "examples" / "guard_map.py").read_text(encoding="utf-8")
         self.assertIn('tests").glob("test_*.py")', script)
-        self.assertIn("merchant_ui_check.py", script,
-                      "只扫单测会漏掉真实窗口上的那些断言")
+        self.assertNotIn("merchant_ui_check.py", script,
+                         "那个脚本已经删了，别再扫一个不存在的文件")
 
 
 if __name__ == "__main__":

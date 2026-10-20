@@ -48,9 +48,16 @@ def run_tests() -> tuple[int, int]:
 
 
 def run_ui_check() -> tuple[int, int]:
-    """跑界面检查，返回 (通过数, 总数)。"""
+    """跑界面检查，返回 (通过数, 总数)。
+
+    界面已经统一到 Web（``web_server`` + ``web_wizard_page``），原来的 Tk 界面
+    检查脚本跟着删了。这里保留一个"没有就跳过"的口径，免得文档自查跟着界面一起失效。
+    """
+    script = ROOT / "examples" / "merchant_ui_check.py"
+    if not script.is_file():
+        return (0, 0)
     proc = subprocess.run(
-        [sys.executable, "examples/merchant_ui_check.py"],
+        [sys.executable, str(script)],
         cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace",
         env={**__import__("os").environ, "PYTHONPATH": str(ROOT / "src")},
     )
@@ -121,7 +128,7 @@ class StaleBackendTests(unittest.TestCase):
         """默认后端已经是 DeepSeek。产品不该再被描述成"必须先起 OpenCode"。
 
         刻意收窄：只认**"必须/需要 + OpenCode + 启动或运行"** 这类说法。
-        早先写成"同��行里既有 opencode 又有必须就算"，结果把
+        早先写成"同一行里既有 opencode 又有必须就算"，结果把
         「只差**上游登录**：python examples/prepare_isolated_opencode.py」
         这类**验证流程**说明也判成违规 —— 那条说的是怎么验证真实模型，
         不是说产品离不开它。

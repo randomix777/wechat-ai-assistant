@@ -2,15 +2,15 @@
 
 ## 为什么要把它从界面里搬出来
 
-摘要的「取哪些消息」「能不能放行」「密钥从哪来」这几件事，最早写在
-``merchant_ui.py`` 里。后来又要加一个 Web 界面 —— 如果照抄一份，就会有
-两份判据。而两份判据必然在某次改动后分叉：
+摘要的「取哪些消息」「能不能放行」「密钥从哪来」这几件事，最早写在界面层
+（Tk 的 ``merchant_ui.py``，现在已删）里。后来又要加一个 Web 界面 —— 如果照抄
+一份，就会有两份判据。而两份判据必然在某次改动后分叉：
 
     第一处（按钮显不显示）改成「库里还有就放行」
     第二处（点了之后放不放行）还是老判据
     → 按钮出现了，一点却弹「还没有读到消息」
 
-这个 bug 本轮真实发生过。所以：**判据只有一份，两个界面都从这里取。**
+这个 bug 真实发生过。所以：**判据只有一份，界面只从这里取。**
 
 ## 界面层只负责三件事
 
@@ -130,15 +130,20 @@ def has_messages_for(app: Any, result: Any) -> bool:
 
 
 def messages_for_summary(app: Any, result: Any, role_id: str = "",
-                         full_history: bool = False) -> list[dict[str, Any]]:
+                         full_history: bool = False,
+                         defer_watermarks: bool = False) -> list[dict[str, Any]]:
     """按会话取消息供模型分析。
 
     有 ``role_id`` 时默认走**增量路径**：取该会话水位线（上次分析到的消息）
-    之后的新增消息，无水位线（首次或角色切换后）取全量。``full_history``
+    之后的新增消息；没有水位线（首次或换角色后）取**最近**的一批。``full_history``
     用于用户明确选择全量重分析时，忽略水位线并读取所有已保存消息。
 
-    返回的消息已带 ``id`` 字段，供水位线回写；``group_label`` 用于结果页
+    一次最多 ``SUMMARY_MESSAGE_LIMIT`` 条，是**成本上限**不是范围承诺：没有水位线时
+    从最新往回取（商户关心的是"最近在聊什么"），之后按水位线一批批往后追。
+    返回的消息按时间正序，供水位线回写；``group_label`` 用于结果页
     展示；``_analysis_document_text`` 等字段由 ``_attach_media`` 回填。
+    ``defer_watermarks`` 用于 AI 任务：等至少有报告成功后才推进水位线，失败重试
+    才能拿到同一批消息。
     """
     target = _app(app)
     store = getattr(target, "orders", None)
@@ -153,6 +158,10 @@ def messages_for_summary(app: Any, result: Any, role_id: str = "",
         if name and not getattr(item, "error", "") and name not in groups:
             groups.append(name)
     if not groups:
+        # 旧结果对象（没有 coverage，只有导入批次）走这条。真实读取不会落到这里：
+        # import_ids 和 coverage 在同一次循环里一起写，import_ids 非空时 coverage 也非空。
+        # 但**照样按该角色的水位线过滤** —— 不然这条路每跑一次都把同一批消息重发一遍、
+        # 重新计费（"同一个角色只发新增"的承诺在这里漏掉）。
         import_ids = [str(x) for x in (getattr(result, "import_ids", None) or []) if x]
         if import_ids:
             marks = ",".join("?" for _ in import_ids)
@@ -167,6 +176,24 @@ def messages_for_summary(app: Any, result: Any, role_id: str = "",
                          "group_label": labels.get(str(row["group_id"] or ""), str(row["group_id"] or "")),
                          **_row_to_message(row)}
                         for row in rows]
+            if role_id and not full_history:
+                _ensure_analysis_tables(store)
+                watermarks: dict[str, tuple[str, str]] = {}
+                for group in {str(item.get("group_id") or "") for item in messages}:
+                    wm = _get_watermark(store, tenant, group, role_id)
+                    if wm is not None:
+                        watermarks[group] = (wm[1], wm[0])  # (last_sent_at, last_msg_id)
+                messages = _after_watermarks(messages, watermarks)
+                # 和按会话那条分支对称：直接调用（defer_watermarks=False）时这里就把
+                # 水位线推到最后一条；AI 任务会延迟到报告成功后再推（见 run_summary）。
+                if not defer_watermarks and messages:
+                    last: dict[str, tuple[str, str]] = {}
+                    for item in messages:
+                        last[str(item.get("group_id") or "")] = (
+                            str(item.get("id") or ""), str(item.get("sent_at") or ""))
+                    for group, (mid, sent_at) in last.items():
+                        if group and mid:
+                            _set_watermark(store, tenant, group, role_id, mid, sent_at)
             _enrich_image_metadata_from_wcdb(app, result, messages)
             return _attach_media(messages)
         return []
@@ -187,20 +214,25 @@ def messages_for_summary(app: Any, result: Any, role_id: str = "",
                 + limit_clause,
                 [tenant, group, last_sent_at, last_sent_at, last_msg_id]).fetchall()
         else:
+            # 没有水位线（首次 / 换角色）：取**最近**的一批，按新→旧取完再翻回
+            # 时间正序。以前这里是正序 + LIMIT，等于把**最旧**的 200 条喂给模型
+            # —— 大群第一次跑活动助手，报告讲的是几个月前的事。
             rows = store.db.execute(
                 "SELECT group_id, sender, content, kind, media_json, COALESCE(sent_at, observed_at) AS sent_at, id, source_id"
                 " FROM messages WHERE merchant_id=? AND group_id=? "
-                " ORDER BY COALESCE(sent_at_epoch, strftime('%s', observed_at)), observed_at, id"
+                " ORDER BY COALESCE(sent_at_epoch, strftime('%s', observed_at)) DESC, observed_at DESC, id DESC"
                 + limit_clause,
                 [tenant, group]).fetchall()
+            rows = list(reversed(rows))
         for row in rows:
             messages.append({"group_id": str(row["group_id"] or ""),
                              "group_label": labels.get(str(row["group_id"] or ""), str(row["group_id"] or "")),
                              **_row_to_message(row)})
             last_per_group[group] = (str(row["id"]), str(row["sent_at"]))
-    # 写回水位线：每个会话只记住最后一条（已按时间正序，最后一条最大）。
-    for group, (msg_id, sent_at) in last_per_group.items():
-        _set_watermark(store, tenant, group, role_id, msg_id, sent_at)
+    # 直呼取数函数时维持原有行为；AI 任务延迟到成功后提交，失败可重试。
+    if not defer_watermarks:
+        for group, (msg_id, sent_at) in last_per_group.items():
+            _set_watermark(store, tenant, group, role_id, msg_id, sent_at)
     _enrich_image_metadata_from_wcdb(app, result, messages)
     return _attach_media(messages)
 
@@ -479,6 +511,16 @@ ANALYSIS_REPORT_SQL = (
     " updated_at TEXT NOT NULL,"
     " PRIMARY KEY(merchant_id, report_key, role_id))"
 )
+#: 多会话时**每个会话各自的报告**。合并后的那份存上面那张表；这一张存分段。
+#: 只存合并文本的话，重启/导出之后店主再想看"那个群单独说了什么"就没了 ——
+#: 而分段是模型**分开生成的**，本来就存在，没有理由丢掉。
+ANALYSIS_GROUP_REPORT_SQL = (
+    "CREATE TABLE IF NOT EXISTS analysis_group_reports("
+    "merchant_id TEXT NOT NULL, role_id TEXT NOT NULL, group_label TEXT NOT NULL,"
+    " report_text TEXT NOT NULL DEFAULT '', message_count INTEGER NOT NULL DEFAULT 0,"
+    " position INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL,"
+    " PRIMARY KEY(merchant_id, role_id, group_label))"
+)
 
 
 def _ensure_analysis_tables(store: Any) -> None:
@@ -486,10 +528,40 @@ def _ensure_analysis_tables(store: Any) -> None:
     try:
         store.db.execute(ANALYSIS_WATERMARK_SQL)
         store.db.execute(ANALYSIS_REPORT_SQL)
+        store.db.execute(ANALYSIS_GROUP_REPORT_SQL)
         store.db.commit()
     except Exception:
         # 表建不了不该阻断分析：退回全量取消息，走老路径。
         LOGGER.debug("analysis tables not created", exc_info=True)
+        return
+    # 老库的 analysis_group_reports 没有 position 列（先有表、后有"按选择顺序排"）。
+    # 单独 try：加列失败（比如已经加过）不该把上面建好的表一起算失败。
+    try:
+        store.db.execute("ALTER TABLE analysis_group_reports"
+                         " ADD COLUMN position INTEGER NOT NULL DEFAULT 0")
+        store.db.commit()
+    except Exception:
+        pass
+
+
+def _after_watermarks(messages: list[dict[str, Any]],
+                      watermarks: dict[str, tuple[str, str]]) -> list[dict[str, Any]]:
+    """只留水位线之后的消息。判据和 SQL 那条**同一个**：``(sent_at, id)`` 严格大。
+
+    ``watermarks`` 是 ``{会话: (last_sent_at, last_msg_id)}``。没有水位线的会话
+    整段保留（首次跑）。
+    """
+    kept: list[dict[str, Any]] = []
+    for item in messages or ():
+        wm = watermarks.get(str(item.get("group_id") or ""))
+        if wm is None:
+            kept.append(item)
+            continue
+        sent_at = str(item.get("sent_at") or "")
+        msg_id = str(item.get("id") or "")
+        if (sent_at, msg_id) > wm:
+            kept.append(item)
+    return kept
 
 
 def _get_watermark(store: Any, tenant: str, group_id: str, role_id: str) -> tuple[str, str] | None:
@@ -557,14 +629,130 @@ def _set_report(store: Any, tenant: str, report_key: str, role_id: str,
         LOGGER.debug("write report failed", exc_info=True)
 
 
-def _analysis_report_key(group_ids: list[str] | tuple[str, ...], role_id: str) -> str:
-    """Version persisted reports when the role's output contract changes."""
-    from .roles import ROLE_ORDER
+def _analysis_report_key(role_id: str) -> str:
+    """一个角色一份报告：**最新的那份赢**。
 
-    joined = "_".join(sorted(str(group or "") for group in group_ids if group))
-    if str(role_id or "") == ROLE_ORDER:
-        return f"order-intent-table-v1:{joined}"
-    return joined
+    不把 ``RoleDef.version`` 编进键：提示词升级之后，如果历史消息已经到水位线，
+    商户会一条都跑不出来 —— 那时把旧版本的行藏起来，等于让他的报告凭空消失。
+    提示词换了要不要重算由**批量缓存**负责（``_summary_cache_key`` 里带版本），
+    这一行只存"最后一次成功的产出"，下次成功跑覆盖它。
+    """
+    return f"{role_id}-report"
+
+
+def save_role_report(store: Any, tenant: str, role_id: str,
+                     report_text: str, message_count: int,
+                     groups: Sequence[Mapping[str, Any]] | None = None) -> None:
+    """把这次成功的角色报告落盘（合并那份 + 每个会话的分报告）。
+
+    不落盘的话：关掉软件再打开，「查看 AI 整理报告」和导出都拿不到 —— 钱花了，
+    报告没了（而水位线已经推进，同角色重跑会说"没有新消息"）。
+
+    ``groups`` 是 ``[{group_label, report, message_count}]``（见
+    ``_run_summary_*`` 的 ``group_reports``）。每次成功都**整批替换**这一角色的
+    分报告：上一次选的是别的会话，留着会让"这次到底分析了哪几个群"对不上。
+    """
+    text = str(report_text or "").strip()
+    role = str(role_id or "").strip()
+    if not text or not role or store is None:
+        return
+    _set_report(store, tenant, _analysis_report_key(role), role, text, int(message_count or 0))
+    _replace_group_reports(store, tenant, role, groups)
+
+
+def _replace_group_reports(store: Any, tenant: str, role_id: str,
+                           groups: Sequence[Mapping[str, Any]] | None) -> None:
+    """整体替换某个角色的分报告。空的就不写（别把上一次的清成空表）。"""
+    rows: list[tuple[str, str, int]] = []
+    for item in groups or ():
+        label = str((item or {}).get("group_label") or "").strip()
+        text = str((item or {}).get("report") or "").strip()
+        if not label or not text:
+            continue
+        rows.append((label, text, int((item or {}).get("message_count") or 0)))
+    if not rows:
+        return
+    _ensure_analysis_tables(store)
+    now = __import__("datetime").datetime.now().isoformat()
+    try:
+        store.db.execute(
+            "DELETE FROM analysis_group_reports WHERE merchant_id=? AND role_id=?",
+            [tenant, role_id])
+        for position, (label, text, count) in enumerate(rows):
+            store.db.execute(
+                "INSERT INTO analysis_group_reports(merchant_id, role_id, group_label,"
+                " report_text, message_count, position, updated_at)"
+                " VALUES(?,?,?,?,?,?,?)"
+                " ON CONFLICT(merchant_id, role_id, group_label) DO UPDATE SET"
+                " report_text=excluded.report_text, message_count=excluded.message_count,"
+                " position=excluded.position, updated_at=excluded.updated_at",
+                [tenant, role_id, label, text, count, position, now])
+        store.db.commit()
+    except Exception:
+        LOGGER.debug("write group reports failed", exc_info=True)
+
+
+def load_group_reports(store: Any, tenant: str, role_id: str) -> list[dict[str, Any]]:
+    """某个角色上次落盘的**分会话**报告，按当时的分析顺序排。没有返回空列表。
+
+    顺序用 ``position``（写入时按 ``group_reports`` 的次序），不按会话名字母排 ——
+    重启之后会话块跳成字典序，商户会以为"怎么重新排了"。
+    """
+    role = str(role_id or "").strip()
+    if not role or store is None:
+        return []
+    _ensure_analysis_tables(store)
+    try:
+        rows = store.db.execute(
+            "SELECT group_label, report_text, message_count FROM analysis_group_reports"
+            " WHERE merchant_id=? AND role_id=? ORDER BY position, group_label",
+            [tenant, role]).fetchall()
+    except Exception:
+        LOGGER.debug("read group reports failed", exc_info=True)
+        return []
+    return [{"group_label": str(row["group_label"] or ""),
+             "report": str(row["report_text"] or ""),
+             "message_count": int(row["message_count"] or 0)}
+            for row in rows if str(row["report_text"] or "").strip()]
+
+
+def _report_row(store: Any, tenant: str, where: str, params: list[Any]) -> dict[str, Any] | None:
+    _ensure_analysis_tables(store)
+    try:
+        row = store.db.execute(
+            "SELECT report_key, role_id, report_text, message_count, updated_at"
+            " FROM analysis_reports WHERE merchant_id=?" + where
+            + " ORDER BY updated_at DESC LIMIT 1", [tenant, *params]).fetchone()
+    except Exception:
+        LOGGER.debug("read report failed", exc_info=True)
+        return None
+    if not row:
+        return None
+    text = str(row["report_text"] or "").strip()
+    if not text:
+        return None
+    role_id = str(row["role_id"] or "")
+    return {"role_id": role_id,
+            "summary": text,
+            "total": int(row["message_count"] or 0),
+            "updated_at": str(row["updated_at"] or ""),
+            # 分会话那几份跟着走：结果页要能按会话展开。
+            "groups": load_group_reports(store, tenant, role_id)}
+
+
+def load_role_report(store: Any, tenant: str, role_id: str) -> dict[str, Any] | None:
+    """取某个角色最后落盘的报告；没有返回 None。"""
+    role = str(role_id or "").strip()
+    if not role or store is None:
+        return None
+    return _report_row(store, tenant, " AND role_id=?", [role])
+
+
+def latest_role_report(store: Any, tenant: str) -> dict[str, Any] | None:
+    """最近一份角色报告（不分角色）：重启后恢复界面与导出用它。"""
+    if store is None:
+        return None
+    return _report_row(store, tenant, "", [])
 
 
 def _gateway_client(app: Any) -> Any | None:
@@ -840,7 +1028,15 @@ def _sync_image_statuses(originals: list[dict[str, Any]],
 
 def _summary_cache_key(stage: str, model: str, role_id: str,
                        group: str, value: Any) -> str:
-    raw = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str,
+    # A role prompt change must not reuse reports generated under the old
+    # instructions. Include the role's explicit version in every role cache key.
+    role_version = ""
+    if role_id:
+        from .roles import get_role
+        role_version = str(get_role(role_id).version or "")
+    cache_value = ({"role_version": role_version, "input": value}
+                   if role_id else value)
+    raw = json.dumps(cache_value, ensure_ascii=False, sort_keys=True, default=str,
                      separators=(",", ":"))
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     return f"{stage}:{model}:{role_id}:{group}:{digest}"
@@ -1228,7 +1424,7 @@ def _reduce_summary_reports(client: Any, model: str, role_id: str, group: str,
     """Merge analysis batches pairwise so document-heavy chats never make one huge reducer prompt."""
     from .jyi_parse import (
         build_order_report_merge_messages,
-        build_role_analysis_messages,
+        build_role_report_merge_messages,
         build_summary_messages,
     )
     from .roles import ROLE_ORDER
@@ -1246,7 +1442,7 @@ def _reduce_summary_reports(client: Any, model: str, role_id: str, group: str,
                 continue
             # Version the reducer cache: old entries may contain unbounded expanded
             # reports produced before the reducer output cap was introduced.
-            key = _summary_cache_key(f"order-reduce-v4-{level}", model, role_id,
+            key = _summary_cache_key(f"role-reduce-v5-{level}", model, role_id,
                                      group, {"index": index // 2, "reports": pair})
             result = "" if force_refresh else cache.get(key, "")
             if not result:
@@ -1256,14 +1452,15 @@ def _reduce_summary_reports(client: Any, model: str, role_id: str, group: str,
                     # These are completed reports, not chat lines. Don't feed the
                     # artificial chunk label through the customer attribution prompt.
                     prompt = build_order_report_merge_messages(pair)
+                elif role_id:
+                    prompt = build_role_report_merge_messages(pair, role_id)
                 else:
                     inputs = [
                         {"sender": f"分析分段 {index + offset + 1}", "content": report,
                          "kind": "text", "sent_at": ""}
                         for offset, report in enumerate(pair)
                     ]
-                    prompt = (build_role_analysis_messages(inputs, role_id) if role_id
-                              else build_summary_messages(inputs))
+                    prompt = build_summary_messages(inputs)
                     prompt[-1] = dict(prompt[-1])
                     prompt[-1]["content"] += (
                         "\n以上是同一会话不同类别或批次的分析结果。请合并为一份报告，"
@@ -1409,9 +1606,9 @@ def _run_summary_jyi(client: Any, messages: list[dict[str, Any]], role_id: str =
                 # run also has image batches. Keep their cache key text-only so a
                 # vision-enabled run can reuse a completed text analysis instead
                 # of submitting the same slow request again.
-                cache_stage = ("vision-map-v2" if category == "图片" else
-                               "multimodal-map-v1" if category == "多模态" and send_images else
-                               "text-only-map-v4")
+                cache_stage = ("vision-map-v3" if category == "图片" else
+                               "multimodal-map-v2" if category == "多模态" and send_images else
+                               "text-only-map-v5")
                 cache_key = _summary_cache_key(cache_stage, model, role_id, group, batch_chunk)
                 report = None if force_refresh else cache.pop(cache_key, None)
                 if not report:
@@ -1504,7 +1701,7 @@ def _run_summary_jyi(client: Any, messages: list[dict[str, Any]], role_id: str =
                                             include_images=False,
                                             diagnostic_context=diagnostic_context + "/text-fallback")
                                         text_cache_key = _summary_cache_key(
-                                            "text-only-map-v4", model, role_id, group, text_chunk)
+                                            "text-only-map-v5", model, role_id, group, text_chunk)
                                         cache[text_cache_key] = text_report
                                         if app is not None:
                                             _persist_summary_cache(app, cache)
@@ -1561,15 +1758,39 @@ def _run_summary_jyi(client: Any, messages: list[dict[str, Any]], role_id: str =
             if len(chunk_reports) == 1:
                 final_report = chunk_reports[0]
             else:
-                final_report = "\n\n".join(
-                    f"【分段 {index}/{len(chunk_reports)}】\n{report}"
-                    for index, report in enumerate(chunk_reports, start=1))
+                # 同一会话的多批结果**必须收成一份**。这里以前只是把
+                # 「【分段 i/n】」拼起来，而网关那条路会真的调一次 AI 合并 ——
+                # 同一个功能两种形状，商户看到的报告取决于走了哪条通道。
+                try:
+                    final_report = _reduce_summary_reports(
+                        client, model, role_id, group, chunk_reports, cache, app,
+                        max_output_tokens, on_progress=on_progress,
+                        on_stream=None, is_cancelled=is_cancelled,
+                        force_refresh=force_refresh)
+                except AnalysisCancelled:
+                    raise
+                except Exception as exc:
+                    # 合并失败（超长、接口报错）退回原分段：每份各自完整可读，
+                    # 不能让"合并这一步"把整次分析判死。
+                    LOGGER.warning(
+                        "AI analysis merge failed; keeping segments "
+                        "(group=%s batches=%d): %s", group, len(chunk_reports), exc)
+                    final_report = "\n\n".join(
+                        f"【分段 {index}/{len(chunk_reports)}】\n{report}"
+                        for index, report in enumerate(chunk_reports, start=1))
+                    if on_progress:
+                        on_progress(f"{group_labels[group]}：分段合并失败，已保留原分段")
+                else:
+                    merge_header = (f"\n\n【{group_labels[group]}·合并分段】\n" if show_group
+                                    else "\n\n【合并分段】\n")
+                    _emit_stream(on_stream, f"{merge_header}{final_report}")
             reports.append(f"【{group_labels[group]}】\n{final_report}" if show_group
                            else final_report)
             group_reports.append({
                 "group_id": group,
                 "group_label": group_labels[group],
                 "report": final_report,
+                "message_count": group_processed,
             })
             completed_groups.append(group)
             processed += group_processed
@@ -1741,7 +1962,7 @@ def _run_summary_gateway(app: Any, client: Any, messages: list[dict[str, Any]],
 
     def run_batch(stage: str, group: str, batch: list[dict[str, Any]]) -> tuple[str, str]:
         nonlocal total_cost, cost_known, submitted_batches
-        key = _summary_cache_key(f"text-only-{stage}-v4", model, role_id, group, batch)
+        key = _summary_cache_key(f"text-only-{stage}-v5", model, role_id, group, batch)
         cached = None if force_refresh else cache.pop(key, None)
         if cached:
             cache[key] = cached
@@ -1817,6 +2038,8 @@ def _run_summary_gateway(app: Any, client: Any, messages: list[dict[str, Any]],
                 "group_id": group,
                 "group_label": group_labels[group],
                 "report": final_report,
+                # 分会话条数：结果页按会话展开时要能说"这一段覆盖了几条"。
+                "message_count": sum(len(chunk) for chunk in chunks),
             })
             completed_groups.append(group)
             processed += sum(len(chunk) for chunk in chunks)
@@ -1859,7 +2082,9 @@ def run_summary(app: Any, result: Any, role_id: str = "",
     声明全量报告应覆盖旧报告。``force_refresh`` 跳过本地已完成分段缓存，
     用于用户明确要求重新分析全部历史的场景。
     """
-    messages = messages_override if messages_override is not None else messages_for_summary(app, result, role_id=role_id)
+    messages = (messages_override if messages_override is not None else
+                messages_for_summary(app, result, role_id=role_id,
+                                     defer_watermarks=bool(role_id)))
     is_incremental = bool(role_id) if incremental is None else bool(incremental)
     if not messages:
         return {"summary": "", "error": "没读到消息", "cost": None, "message_count": 0,
@@ -1891,6 +2116,20 @@ def run_summary(app: Any, result: Any, role_id: str = "",
                 existing = str(outcome.get("partial_error") or "")
                 outcome["partial_error"] = (existing + "；" + warning) if existing else warning
         outcome["is_incremental"] = is_incremental
+        # 跑过的消息记成"整理过"。原来这一步在 Tk 窗口里做（界面已经删了）——
+        # 谁跑摘要谁记账，别再依赖某个界面，否则换个界面就漏记。
+        if outcome.get("summary") and not outcome.get("cancelled"):
+            mark_organized(getattr(target, "orders", None), getattr(target, "tenant", ""),
+                           messages, outcome, int(outcome.get("message_count") or 0), role_id)
+            if role_id:
+                _advance_watermarks(target, messages, outcome, role_id)
+                # 报告**落盘**：重启后「查看 AI 整理报告」和导出还要用它。
+                # 分会话那几份一起存 —— 只存合并文本的话，分会话段落就丢了。
+                save_role_report(getattr(target, "orders", None),
+                                 getattr(target, "tenant", ""), role_id,
+                                 str(outcome.get("summary") or ""),
+                                 int(outcome.get("message_count") or 0),
+                                 groups=outcome.get("group_reports"))
         return outcome
     finally:
         _SUMMARY_RUN_LOCK.release()
@@ -1958,6 +2197,59 @@ def _gateway_error_text(exc: Exception, max_len: int = 60) -> str:
     return "提交失败，请稍后重试"
 
 
+def mark_organized(store: Any, tenant: str, messages: Sequence[Mapping[str, Any]],
+                   outcome: Mapping[str, Any] | None, processed: int, role: str) -> list[str]:
+    """把跑过 AI 的消息记成"整理过"。返回真的记上的 id。
+
+    这段原来长在界面里（Tk 的 ``MerchantWindow._mark_analyzed_messages``，已删）。
+    它跟 Tk 没关系：``summary_task`` 自己会更新**水位线**，但界面上的"哪些消息
+    算整理过"是从这里落的 —— 不补这一步，跑完 AI 再回来会被当成"没整理过"。
+    所以放在这里，**谁跑摘要谁调它**，不再依赖某个界面。
+
+    只记「跑成的那几组」（``completed_groups``）：失败那组混进去，等于把没整理
+    的消息标成整理过了。
+    """
+    if processed <= 0 or store is None:
+        return []
+    completed = set((outcome or {}).get("completed_groups") or ())
+    ids: list[str] = []
+    for item in messages or ():
+        mid = str(item.get("id") or "")
+        if not mid:
+            continue
+        group = str(item.get("group_id") or item.get("group") or "")
+        if not completed or group in completed:
+            ids.append(mid)
+    if not ids:
+        return []
+    try:
+        store.mark_role_organized(tenant, ids, role)
+    except Exception:
+        LOGGER.exception("记「整理过」失败")
+        return []
+    return ids
+
+
+def _advance_watermarks(app: Any, messages: Sequence[Mapping[str, Any]],
+                        outcome: Mapping[str, Any], role_id: str) -> None:
+    """Commit only conversations with a completed AI report, so retries keep failed input."""
+    target = _app(app)
+    store = getattr(target, "orders", None)
+    tenant = str(getattr(target, "tenant", "") or "")
+    if store is None:
+        return
+    completed = set(str(group) for group in (outcome.get("completed_groups") or ()) if group)
+    last_by_group: dict[str, tuple[str, str]] = {}
+    for item in messages or ():
+        group = str(item.get("group_id") or item.get("group") or "")
+        message_id = str(item.get("id") or "")
+        if not group or not message_id or (completed and group not in completed):
+            continue
+        last_by_group[group] = (message_id, str(item.get("sent_at") or ""))
+    for group, (message_id, sent_at) in last_by_group.items():
+        _set_watermark(store, tenant, group, role_id, message_id, sent_at)
+
+
 def import_reference(app: Any, kind: str, text: str) -> dict[str, Any]:
     """导入商品或客户名单。``kind`` 取 ``products`` / ``customers``。
 
@@ -1988,5 +2280,8 @@ __all__ = [
     "history_message_counts",
     "messages_for_history",
     "analyzed_group_ids",
+    "latest_role_report",
+    "load_role_report",
     "run_summary",
+    "save_role_report",
 ]

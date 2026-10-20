@@ -459,7 +459,8 @@ class MerchantWordingTests(unittest.TestCase):
         self.assertEqual(describe_subscription({})["headline"], "未登录")
 
     def test_interface_text_contains_no_technical_terms(self):
-        from wechat_ai_assistant.merchant_ui import FORBIDDEN_TERMS, STATUS_LABELS, audit_text
+        from wechat_ai_assistant.dashboard import STATUS_LABELS
+        from wechat_ai_assistant.merchant_text import FORBIDDEN_TERMS, audit_text
 
         self.assertEqual(audit_text("剩余额度：42"), [])
         for label in STATUS_LABELS.values():
@@ -480,7 +481,7 @@ class MerchantWordingTests(unittest.TestCase):
             STATUS_SUBSCRIPTION_EXPIRED,
             STATUS_WAITING_BROWSER,
         )
-        from wechat_ai_assistant.merchant_ui import merchant_labels
+        from wechat_ai_assistant.merchant_text import merchant_labels
 
         expected = {
             STATUS_LOGGED_OUT,

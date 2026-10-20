@@ -39,3 +39,12 @@ gateway.local.env
 # generated server password and the upstream credentials the user logs into
 # there. Nothing in here belongs in version control.
 .opencode-private/
+
+# Release bundles and the checksums/tool caches that sit next to them. The
+# build is reproducible from deploy/merchant.spec, so the artifacts do not
+# belong in version control either — the same rule as build/ and dist/.
+微信AI智能助理-win64-*.zip
+微信AI智能助理-win64-*.zip.sha256
+微信AI智能助理-win64-*/
+.wrangler/
+.commandcode/

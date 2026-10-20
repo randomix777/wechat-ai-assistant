@@ -78,7 +78,6 @@ xx(class).yy(method)
 
 ##### class(类) 包括
 
-- `AutoReply`:自动回复操作。(一种简单的实现方式，如果对此感兴趣可以使用wechat_ai_assistant内部的一些方法自行尝试)
 - `Call`: 给某个好友打视频或语音电话。
 - `Contacts`: 获取通讯录内各分区(联系人,企业微信联系人,公众号,服务号)好友的名称与详情。
 - `Files`: 文件发送，聊天文件从本地导出等。
@@ -101,7 +100,6 @@ xx(class).yy(method)
 
 - `At`:在群聊中At指定的一些好友
 - `At_all`:在群聊中At所有人
-- `auto_reply_to_friend_decorator`:自动回复好友装饰器
 - `get_new_message_num`：获取新消息总数,微信按钮上的红色数字
 - `scan_for_newMessages`：会话列表遍历一遍有新消息提示的对象,返回好友名称与数量
 - `open_red_packet`: 点击打开好友发送的红包
@@ -189,20 +187,6 @@ print(result)
 !["监听会话列表"](/pics/监听会话列表.png "监听会话列表")
 
 !["监听会话列表结果"](/pics/监听会话列表结果.png "监听会话列表结果")
-</br>
-
-#### 自动回复会话列表内的新消息
-
-```python
-from wechat_ai_assistant import AutoReply
-def reply_func(friend,newMessage):
-    return f'我在自动回复:{friend},这是对方发送的新消息:{newMessage}'
-#maxPages设置为0不滚动,只在顶部可见部分自动回复,全屏+maxPages为0+需要回复对象置顶=稳定安全
-responded_detail=AutoReply.auto_reply_messages(callback=reply_func,duration='1min',maxPages=0)
-print(responded_detail)
-```
-
-!["自动回复会话列表新消息"](/pics/自动回复会话列表新消息.png "自动回复会话列表新消息")
 </br>
 
 #### 朋友圈内容导出

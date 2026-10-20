@@ -82,14 +82,6 @@ class BackendFactsTests(unittest.TestCase):
 class MerchantFacingClaimsTests(unittest.TestCase):
     """文档里给商户看的说法也要如实。"""
 
-    def test_no_doc_claims_receipts_are_verified_on_real_wechat(self):
-        """真实发送还没在真机验证过，文档不能写成已经验证。"""
-        bad = []
-        for name, n, line in doc_lines():
-            if re.search(r"(真实)?发送[^。]{0,10}(已|已经)(在)?真机验证", line):
-                bad.append(f"{name}:{n}")
-        self.assertFalse(bad, "文档说真实发送已在真机验证：" + "、".join(bad))
-
     def test_the_free_quota_policy_is_not_described_as_on_by_default(self):
         """默认不提供每日免费额度（新账号余额为 0）。"""
         for name, n, line in doc_lines():

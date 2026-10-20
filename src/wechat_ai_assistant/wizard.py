@@ -1,12 +1,22 @@
 """首次使用向导：可恢复、可测试、无需命令行。
 
-    ① 微信    →  ② 选会话  →  ③ 读历史  →  ④ 查额度  →  ⑤ 智能整理  →  ⑥ AI分析详情
+    登录前置页 → ⓪ 微信 → ① 选会话（含读取范围）→ ② 读历史 → ③ 智能整理 → ④ 分析详情 → 首页
 
-每一步的结果都写进本地设置，正常情况下下次启动直接进首页，**不重走向导**。
-只有两种情况会回到向导：
+少了两屏，都是同一件事被拆开画的：
 
-* 第一次启动；
-* 微信账号切换 —— 旧账号的会话绑定和客户记忆不能混用，必须重新绑定。
+* 「核对读取明细」不再单独占一步：读到的结果表就画在「读历史」那一屏上，
+  再看一屏只是把同一条数据再画一遍，却多一次点击。
+* 「确认读取范围」并进「选择会话」：它列的就是商户刚勾的那些名字，
+  而「更新消息 / 读取全部」两个按钮本来在读取那一屏也有。
+
+登录产品账号是进入向导的前置门槛，不占办理流程的步骤编号；未登录时显示独立登录页，
+登录后从第 0 步「检查微信」开始。门禁判据仍只认 :meth:`Wizard.product_gate_open`。
+
+每次启动都回到向导起点：**就是那页登录前置页**（已登录时它写着「已经登录」+ 额度，
+点一下「下一步」就进流程），落点不由账号是什么时候恢复的来决定。上次选的会话同时被
+装回来（:meth:`Wizard.restore`），选择会话那一屏照样显示成已勾选，不用重新挑群。
+走完过向导的机器多一个落脚点：首页（:meth:`Wizard.finish` 之后的 ``done`` 屏），
+首页的「再读一次」能回到选择会话那一屏。
 
 ## 状态机而不是一堆 if
 
@@ -16,9 +26,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
+
+LOGGER = logging.getLogger(__name__)
 
 from .conversations import Conversation, ConversationRegistry
 from .history_read import (
@@ -30,39 +43,71 @@ from .history_read import (
     ReadMode,
     TimeWindow,
 )
-from .runmode import AutoOrderSettings, MerchantSettings, RunMode, SettingsStore
+from .runmode import AutoOrderSettings, MerchantSettings, SettingsStore
 from .wechat_state import WeChatMonitor, WeChatState, WeChatStatus
+
+#: 没勾会话就想读/往下走时给商户看的那句话。**只此一处**：
+#: 「下一步」的判据（:meth:`Wizard.advance`）和接口里的读取前置检查都用它，
+#: 各写一句迟早变成两种说法。
+NO_CONVERSATION_SELECTED = "至少勾选一个要读取的会话。"
 
 
 class WizardStep:
+    #: 登录页是向导前的身份门槛，不是办理步骤；登录状态仍用独立状态值承载。
+    LOGIN = "login"
     WECHAT = "wechat"
     CONVERSATIONS = "conversations"
-    HISTORY = "history"
     READ = "read"
-    REVIEW = "review"
     QUOTA = "quota"
     ANALYZE = "analyze"
     RESULTS = "results"
     DONE = "done"
 
-    #: 商户看到的步骤。确认范围与真正执行分开，执行与核对也分开：
-    #: 花额度整理之前，必须先亲眼看到读到了什么。
-    ORDER = (WECHAT, CONVERSATIONS, HISTORY, READ, REVIEW, ANALYZE, RESULTS)
-
-    TITLES = {
-        WECHAT: "检查微信",
-        CONVERSATIONS: "选择会话",
-        HISTORY: "确认读取范围",
-        READ: "读取历史消息",
-        REVIEW: "核对读取明细",
-        QUOTA: "智能整理",
-        ANALYZE: "智能整理",
-        RESULTS: "AI分析详情",
-        DONE: "开始使用",
+    #: **流程事实只此一处**：办理步骤 id → (页面标题, 步骤条上的短名)。
+    #: 登录是进入流程的前置页，不进入列表、不占编号；编号从「检查微信」开始。
+    #: 界面（Tk 的页面标题、步骤条圆点、Web 的 /api/state）一律从这里取，
+    #: 不许再各自写一份 —— 加一步/改个措辞只改这张表。
+    STEP_SPECS: dict[str, tuple[str, str]] = {
+        WECHAT: ("检查微信", "检查微信"),
+        CONVERSATIONS: ("选择会话", "选择会话"),
+        READ: ("读取历史消息", "读取消息"),
+        ANALYZE: ("智能整理", "智能整理"),
+        RESULTS: ("AI分析详情", "AI分析"),
     }
 
+    #: 商户看到的步骤，顺序即 :data:`STEP_SPECS` 的顺序。
+    ORDER = tuple(STEP_SPECS)
 
-@dataclass
+    #: 步骤标题。不在向导里的两个（额度页、首页）也留着：额度页与智能整理同一屏，
+    #: 首页是跑完之后的落脚点。
+    TITLES = {LOGIN: "登录产品账号", **{step: spec[0] for step, spec in STEP_SPECS.items()}}
+    TITLES[QUOTA] = STEP_SPECS[ANALYZE][0]
+    TITLES[DONE] = "可以开始用了"
+
+    #: 步骤条上的短名（窄窗口放不下长标题）。
+    SHORT = {step: spec[1] for step, spec in STEP_SPECS.items()}
+
+    @classmethod
+    def number(cls, step: str) -> int:
+        """办理步骤编号。登录前置页不编号，额度页与智能整理同屏。"""
+        if step == cls.QUOTA:
+            step = cls.ANALYZE
+        return cls.ORDER.index(step)
+
+    @classmethod
+    def page_title(cls, step: str) -> str:
+        """页面标题。登录前置页和首页不编号，其余按流程顺序编号。
+
+        界面不要自己拼这个字符串：编号和标题都从这里来，才不会出现
+        "标题写第 1 步、步骤条圆点写 2" 这种自相矛盾。
+        """
+        if step in (cls.LOGIN, cls.DONE):
+            return cls.TITLES[step]
+        if step == cls.QUOTA:
+            step = cls.ANALYZE
+        return f"第 {cls.number(step)} 步　{cls.TITLES[step]}"
+
+
 @dataclass
 class QuotaView:
     """额度。商户只看得到这些中文，不看单位名。
@@ -162,6 +207,46 @@ class QuotaBlocked(Exception):
         self.view = view
 
 
+def _quota_view_from_payload(payload: Mapping[str, Any] | None) -> QuotaView:
+    """把账户接口返回的 ``subscription`` 变成界面用的 :class:`QuotaView`。
+
+    ``check_quota``（联网查）和 :meth:`Wizard.adopt_subscription`（搬运登录时
+    已有的那份）都走这里 —— 两处各解析一遍，迟早一处认 ``plan_code``
+    另一处认 ``plan``，界面上就会出现两个不一样的额度。
+    """
+    payload = payload or {}
+    subscription = payload.get("subscription") or {}
+    balance_known = bool(subscription.get("balance_known", True))
+    total = int(subscription.get("quota_micro_usd", 0) or 0)
+    used = int(subscription.get("used_micro_usd", 0) or 0)
+    reserved = int(subscription.get("reserved_micro_usd", 0) or 0)
+    # remaining 缺了就自己算（JYI 只给总量/已用/预留，不给剩余额）。
+    # 有就信服务端的，不覆盖。
+    remaining = subscription.get("remaining_micro_usd", None)
+    try:
+        remaining = int(remaining) if remaining is not None else max(0, total - used - reserved)
+    except (TypeError, ValueError):
+        remaining = max(0, total - used - reserved)
+    return QuotaView(
+        logged_in=True,
+        balance_known=balance_known,
+        unlimited_quota=(bool(subscription["unlimited"])
+                         if "unlimited" in subscription else None),
+        active=bool(subscription.get("active")),
+        remaining=remaining,
+        plan=str(subscription.get("plan_code", "")),
+        period_end=str(subscription.get("period_end", "")),
+        # 进度条要的是这三个。缺任何一个都画不出百分比 ——
+        # 那是「已用 / 共多少」，不是「还剩多少次」。
+        total_micro_usd=total,
+        used_micro_usd=used,
+        reserved_micro_usd=reserved,
+        purchase_method="manual",
+        purchase_hint=str(payload.get("purchase_hint") or "请联系客服开通或续期。"),
+        message=str(payload.get("message") or ""),
+    )
+
+
 class Wizard:
     """向导状态机。
 
@@ -184,6 +269,7 @@ class Wizard:
         on_wechat: Callable[[WeChatStatus], None] | None = None,
         on_history_done: Callable[[HistoryResult], None] | None = None,
         is_product_logged_in: Callable[[], bool] | None = None,
+        role_analyzer: Callable[[str, Sequence[str] | None], Mapping[str, Any]] | None = None,
     ):
         self.store = settings_store
         self.settings = settings_store.load()
@@ -202,11 +288,15 @@ class Wizard:
         self.on_wechat = on_wechat
         #: 读取结束。界面据此显示结果并给出下一步，**不再自动跳页**。
         self.on_history_done: Callable[[HistoryResult], None] | None = on_history_done
-        #: 产品账号是否已登录。未登录不许离开第 1 步 —— 这是商户定的规则
+        #: 产品账号是否已登录。未登录不许进入办理流程 —— 这是商户定的规则
         #: （"不登录产品不应该允许进入下一步"），门禁判据只认这一个回调。
         #: 为 None 时不限行：单测里直接构造向导，不走产品登录。
         self.is_product_logged_in = is_product_logged_in
-        self.step = WizardStep.WECHAT
+        #: 非订单角色也通过共享 AI 任务分析，由应用装配层提供网关调用器。
+        self.role_analyzer = role_analyzer
+        #: 构造时先处于登录门槛；界面起来时 :meth:`first_step` 会按恢复出的登录态
+        #: 进入登录页或真正的第 0 步。
+        self.step = WizardStep.LOGIN
         self.history_result: HistoryResult | None = None
         self.quota = QuotaView()
         self._lock = threading.RLock()
@@ -257,10 +347,121 @@ class Wizard:
     def save(self) -> None:
         self.store.save(self.settings)
 
-    # --------------------------------------------------------------- ① 微信
+    # ---------------------------------------------------------- 登录前置门槛
+
+    def first_step(self) -> str:
+        """起点对谁都一样：登录前置页（它不占流程编号，见 :data:`WizardStep.STEP_SPECS`）。
+
+        反转记录：这里**又**被改成"按登录状态裁落点"（已登录直接跳到「检查微信」），
+        于是同一个软件每次打开停的地方都不一样 —— 取决于账号是什么时候恢复的。
+        商户要的是每次打开都从头看一眼；已登录时那一屏写「已经登录」+ 额度，
+        点一下「下一步」就进流程，不会白挡一道。
+        """
+        return WizardStep.LOGIN
+
+    def resume(self) -> str:
+        """界面起来时定起始页，并把上次选的会话绑定装回去。
+
+        起点由 :meth:`first_step` 给（恒为登录前置页）；绑定则要装回来 ——
+        「选择会话」那一屏得把上次勾过的会话显示成已勾选，不能因为"从头开始"
+        就让商户重新挑一遍（``restore`` 不动当前步骤）。
+
+        **界面只调它一处**：写两份就会出现一个界面从登录页开始、
+        另一个从检查微信开始。
+        """
+        self.step = self.first_step()
+        self.restore()
+        return self.step
+
+    def sign_out(self) -> None:
+        """退出登录：门禁关上，回到登录前置页。
+
+        **退出后不许留在流程里。** 门禁判据是"产品账号已登录"，而退出登录是
+        唯一一次让它由真变假的操作 —— 向导里那条回登录页的路径长在
+        :meth:`check_wechat` 里，只在微信状态**变化**时才跑；商户停在首页或
+        核对页点退出时它一次都不会跑，于是页面留在原地、只有顶栏变成「未登录」
+        （真实报障：退出登录没有回到登录页）。
+        """
+        self._go(WizardStep.LOGIN)
+
+    def enter_wechat(self) -> bool:
+        """离开登录前置页进入第 0 步。没登录就不放行，返回 False。"""
+        if not self.product_gate_open():
+            self._log("还没登录产品账号，先登录再进入第 0 步")
+            return False
+        self._go(WizardStep.WECHAT)
+        return True
+
+    def advance(self) -> dict[str, Any]:
+        """把向导往前推一步 —— 界面上所有「下一步」共用这一个判据。
+
+        返回 ``{"ok": bool, "step": str, "reason": str}``。不放行时 ``reason``
+        是**给商户看的一句中文**，界面直接显示，不许自己再编一套 ——
+        两套判据的下场是一处放行、另一处弹"还没读到消息"（这个坑踩过）。
+        """
+        with self._lock:
+            step = self.step
+        if step == WizardStep.LOGIN:
+            if not self.product_gate_open():
+                return {"ok": False, "step": step,
+                        "reason": "还没登录产品账号，先登录才能继续。"}
+            self._go(WizardStep.WECHAT)
+        elif step == WizardStep.WECHAT:
+            if not getattr(self.monitor.latest, "ready", False):
+                return {"ok": False, "step": step,
+                        "reason": "微信还没登录或窗口没打开。先在微信里登录，"
+                                  "再点「重新检测」。"}
+            self._go(WizardStep.CONVERSATIONS)
+        elif step == WizardStep.CONVERSATIONS:
+            if not self.conversations.history_selected:
+                return {"ok": False, "step": step, "reason": NO_CONVERSATION_SELECTED}
+            # 「更新消息 / 读取全部」在读取那一屏：这一步只是把范围定下来。
+            self._go(WizardStep.READ)
+        elif step == WizardStep.READ:
+            if self.history_result is None:
+                return {"ok": False, "step": step,
+                        "reason": "还没有读取结果，先点「更新消息」或「读取全部」。"}
+            # 读到的结果就画在这一屏上：「核对」与「读取」是同一屏，
+            # 不再单开一步把同一张表再画一遍。
+            self._go(WizardStep.ANALYZE)
+        elif step == WizardStep.RESULTS:
+            # 分析详情是最后一屏：这里的「回到首页」就是结束向导。
+            self.finish()
+        else:
+            # 确认范围（要选「更新/全部」，不是「下一步」）和智能整理
+            # （按钮是「开始智能整理」）都没有下一步。
+            return {"ok": False, "step": step,
+                    "reason": "这一步请用页面上的按钮继续。"}
+        with self._lock:
+            return {"ok": True, "step": self.step, "reason": ""}
+
+    def back(self) -> dict[str, Any]:
+        """回上一步。第 0 步没有上一步，登录页也不属于向导步骤。"""
+        with self._lock:
+            step = self.step
+        if step not in WizardStep.ORDER:
+            return {"ok": False, "step": step, "reason": "这一步没有上一步。"}
+        index = WizardStep.ORDER.index(step)
+        if index == 0:
+            return {"ok": False, "step": step, "reason": "这已经是第一步了。"}
+        self._go(WizardStep.ORDER[index - 1])
+        with self._lock:
+            return {"ok": True, "step": self.step, "reason": ""}
+
+    def reread(self) -> str:
+        """首页的「再读一次」：回到「选择会话」。
+
+        范围确认与选择会话是同一屏，所以回的就是那一屏 —— 商户可以改勾选、
+        也可以直接点「更新消息 / 读取全部」。
+        以前页面直接调 :meth:`back`，而首页（``done``）不在要走的步骤里，
+        ``back`` 只会回一句「这一步没有上一步。」—— 首页那行提示
+        「去微信里聊完，回来再读一次就更新了」于是永远点不动。
+        """
+        self._go(WizardStep.CONVERSATIONS)
+        return self.step
 
     def product_gate_open(self) -> bool:
-        """第 1 步放行判据：产品账号已登录。判据只此一处，界面与跳转都问它。"""
+        """放行判据：产品账号已登录。判据只此一处，界面与跳转都问它。"""
         gate = self.is_product_logged_in
         if gate is None:
             return True
@@ -269,13 +470,15 @@ class Wizard:
         except Exception:
             return False
 
+    # --------------------------------------------------------------- ① 微信
+
     def check_wechat(self) -> WeChatStatus:
         """检测一次微信，并把**新状态**通知出去。
 
         无论结果如何都要通知：以前只在"已就绪"时才通知，于是关掉微信再点
         「重新检测」，状态变了界面却一动不动。
 
-        已就绪才往下走；**从就绪掉回未就绪**（微信被关掉）则退回第 1 步 ——
+        已就绪才往下走；**从就绪掉回未就绪**（微信被关掉）则退回第 0 步 ——
         读不到群消息时继续停在后面几步，只会让商户对着一个永远不动的界面
         反复点。
         """
@@ -294,19 +497,25 @@ class Wizard:
             self.settings.account_id = status.account_id
             self._note_wechat_version()
             self.save()
-            # 只有**还停在第 1 步、且产品门禁放行**时才推进。监视器每几秒就检测
+            # 只有**还停在登录前置页或第 0 步、且门禁放行**时才推进。监视器每几秒就检测
             # 一次；以前不判断当前在哪一步，于是商户正在读历史（或者已经走到
             # 首页了）时，一次后台检测就能把他弹回选择页 —— 表现为"读完没有
             # 下一步"、进度条不动。状态好着的时候没有理由打断正在进行的流程。
-            # 未登录产品账号时不推进：门禁规则定的就是"不登录不许进入下一步"，
-            # 留在第 1 步等登录，登录成功后下一次检测会自动放行。
+            # 门禁规则是硬的（"不登录不许进入向导"）：微信就绪但产品账号未登录
+            # 时回到登录前置页。
+            if self.step == WizardStep.LOGIN and self.product_gate_open():
+                # 登录刚完成：进第 0 步，再接着往下判 —— 微信早就
+                # 就绪的话没有理由让商户在两屏之间多点一次。
+                self._go(WizardStep.WECHAT)
             if self.step == WizardStep.WECHAT:
                 if self.product_gate_open():
                     self._go(WizardStep.CONVERSATIONS)
                 else:
-                    self._log("微信已就绪，还差产品账号登录，登录后自动进入下一步")
-        elif self.step != WizardStep.WECHAT:
-            self._log(f"微信状态变为「{status.state}」，回到第 1 步")
+                    # 门禁是硬的：登录过期时回登录前置页，别停在流程里干等。
+                    self._log("微信已就绪，还差产品账号登录，回到登录页")
+                    self._go(WizardStep.LOGIN)
+        elif self.step not in (WizardStep.WECHAT, WizardStep.LOGIN):
+            self._log(f"微信状态变为「{status.state}」，回到第 0 步")
             self._go(WizardStep.WECHAT)
         return status
 
@@ -359,10 +568,8 @@ class Wizard:
         self.conversations.set_live(conversation)
         self.settings.live_conversation = conversation.identity
         self.save()
-        self._go(WizardStep.HISTORY)
-
-    def go_to_history(self) -> None:
-        self._go(WizardStep.HISTORY)
+        # 选完会话往下走：范围确认已经并进选择会话那一屏，下一屏就是读取。
+        self._go(WizardStep.READ)
 
     # ------------------------------------------------------------- ③ 历史
 
@@ -380,7 +587,17 @@ class Wizard:
         if mode not in ReadMode.ALL_KINDS:
             raise ValueError(f"unknown read mode: {mode}")
         kind = range_kind or self.settings.history_range
-        window = HistoryRange.window(kind, custom)
+        # The current merchant UI offers update/all modes, not a custom date
+        # range. Older settings can still contain ``custom`` from a previous
+        # UI, so normalize that stale value instead of failing before reading.
+        if kind == HistoryRange.CUSTOM and custom is None:
+            kind = HistoryRange.LAST_WEEK
+        if mode in (ReadMode.ALL, ReadMode.UPDATE):
+            # These modes are defined by the cursor / full traversal. Applying
+            # a saved date filter here could silently omit older messages.
+            window = TimeWindow(label=mode)
+        else:
+            window = HistoryRange.window(kind, custom)
         limit = int(max_messages or self.settings.history_max_messages or DEFAULT_MAX_MESSAGES)
         self.settings.history_range = kind
         self.settings.history_max_messages = limit
@@ -475,41 +692,26 @@ class Wizard:
             else:
                 self.quota = QuotaView(logged_in=False, message=_network_or_login(exc))
             return self.quota
-        subscription = (payload or {}).get("subscription") or {}
-        balance_known = bool(subscription.get("balance_known", True))
-        total = int(subscription.get("quota_micro_usd", 0) or 0)
-        used = int(subscription.get("used_micro_usd", 0) or 0)
-        reserved = int(subscription.get("reserved_micro_usd", 0) or 0)
-        # remaining 缺了就自己算（JYI 只给总量/已用/预留，不给剩余额）。
-        # 有就信服务端的，不覆盖。
-        remaining = subscription.get("remaining_micro_usd", None)
-        try:
-            remaining = int(remaining) if remaining is not None else max(0, total - used - reserved)
-        except (TypeError, ValueError):
-            remaining = max(0, total - used - reserved)
-        self.quota = QuotaView(
-            logged_in=True,
-            balance_known=balance_known,
-            unlimited_quota=(bool(subscription["unlimited"])
-                             if "unlimited" in subscription else None),
-            active=bool(subscription.get("active")),
-            remaining=remaining,
-            plan=str(subscription.get("plan_code", "")),
-            period_end=str(subscription.get("period_end", "")),
-            # 进度条要的是这三个。缺任何一个都画不出百分比 ——
-            # 那是「已用 / 共多少」，不是「还剩多少次」。
-            total_micro_usd=int(subscription.get("quota_micro_usd", 0) or 0),
-            used_micro_usd=int(subscription.get("used_micro_usd", 0) or 0),
-            reserved_micro_usd=int(subscription.get("reserved_micro_usd", 0) or 0),
-            purchase_method="manual",
-            purchase_hint=str(payload.get("purchase_hint") or "请联系客服开通或续期。"),
-            message=str(payload.get("message") or ""),
-        )
-        if self.quota.sufficient:
-            # 以前这里直接 `_go(ANALYZE)`，于是第 4 步一闪就没了 —— 而"实际读到
-            # 多少条、覆盖哪段时间、有没有缺口"只画在第 4 步上。商户根本没机会看，
-            # 如实上报等于没做。现在不跳：额度与读取结果都留在同一屏里。
-            pass
+        # 额度不足**不跳页**：读取结果与额度留在同一屏里，跳走的话
+        # "实际读到多少条、覆盖哪段时间、有没有缺口"商户就看不到了。
+        self.quota = _quota_view_from_payload(payload)
+        return self.quota
+
+    def adopt_subscription(self, subscription: Mapping[str, Any] | None) -> QuotaView:
+        """把**登录时已经抓到**的那份套餐/额度装进界面状态。不联网。
+
+        登录（``client_login._build_session``）和启动恢复（``restore_session``）
+        都已经从账户接口拿过一次 ``subscription`` 并落盘，但以前没人把它交给
+        向导 —— 于是 ``quota`` 一直是默认值，界面上表现为「已登录」旁边写着
+        「未登录产品账号」，还顺带宣称不限量（默认 total=0 时 ``unlimited``
+        属性为真）。这里只做搬运。
+
+        空字典/缺字段就**保持原样**：把已有的一份真数字擦成"未知"，
+        比不显示更糟。
+        """
+        if not isinstance(subscription, Mapping) or not subscription:
+            return self.quota
+        self.quota = _quota_view_from_payload({"subscription": dict(subscription)})
         return self.quota
 
     def require_quota(self) -> None:
@@ -541,8 +743,7 @@ class Wizard:
 
         ``role`` 是整理角色（每次整理时选，见 :mod:`wechat_ai_assistant.roles`）：
         订单助手走原来的订单链路（模型解析 → 规则校验 → 订单草稿，
-        要过额度门）；其它角色走本机规则引擎（不调模型、不扣费、
-        不建单，产出只进人工核对），不过额度门。
+        要过额度门）；其它角色通过共享 AI 分析服务生成角色报告，不创建订单。
 
         额度不足时抛 :class:`QuotaBlocked`，但**不重复读取、不重复扣费**：
         消息还在本地库，恢复额度后重新调用即可。
@@ -556,6 +757,10 @@ class Wizard:
         role_def = get_role(role)
         if role_def.id != ROLE_ORDER:
             return self._analyze_with_role(role_def, message_ids)
+        if not self.product_gate_open():
+            # 和角色那条路同一句话：没登录时说"未登录产品账号"这种状态词，
+            # 商户读不出下一步该干什么。
+            raise RuntimeError("还没登录产品账号，先登录再整理。")
         self.require_quota()
         self._go(WizardStep.ANALYZE)
         ids = list(message_ids) if message_ids is not None else self._pending_message_ids()
@@ -598,65 +803,103 @@ class Wizard:
             f"整理完成：处理 {summary['processed']} 条，生成订单 {summary['with_result']} 条，"
             f"需要核对 {summary['needs_review']} 条，本次实际扣费 {charged_micro_usd} 次"
         )
-        self.finish()
+        # **不直接 finish()**：先让商户看到这一批的结果和明细（角色整理更是只有
+        # 这一屏能看），由「回到首页」再结束。以前这里直接跳首页，于是
+        # 「AI分析详情」永远到不了，整理明细也就再也没有入口。
+        self._go(WizardStep.RESULTS)
         return summary
 
     def _analyze_with_role(self, role_def: Any, message_ids: Sequence[str] | None) -> dict[str, Any]:
-        """本机规则整理（非订单角色）：不过额度门、不调模型、不建单。
+        """用角色提示词调用 AI，保存报告而不生成订单。
 
-        角色整理不占用"已整理"状态 —— 同一批消息换个角色可以重跑，
-        不会因为"已处理过"被判成 duplicate。产出全部进人工核对。
+        角色整理**同样在花账号的钱**，所以先过额度门 —— 判据和订单链路共用
+        :meth:`require_quota` 这一处，不许有一条不过门的旁路。JYI 通道按账号
+        计量、不在本地结算，那边它本就不拦（有问题服务端直接拒单）。
         """
-        from .roles import organize
-
+        if self.role_analyzer is None:
+            raise RuntimeError("AI 整理服务还没接上，请重启软件后再试一次。")
+        if not self.product_gate_open():
+            # 没登录时别说"额度不足"，更别说"服务没接上"：那两句都指向错误的下一步。
+            raise RuntimeError("还没登录产品账号，先登录再整理。")
+        self.require_quota()
         self._go(WizardStep.ANALYZE)
-        ids = list(message_ids) if message_ids is not None else self._pending_message_ids()
-        rows: list[dict[str, Any]] = []
-        if ids:
-            placeholders = ",".join("?" for _ in ids)
-            try:
-                fetched = self.orders().db.execute(
-                    "SELECT id, group_id, sender, content, sent_at, kind FROM messages "
-                    f"WHERE merchant_id=? AND id IN ({placeholders})",
-                    (self.tenant, *ids)).fetchall()
-            except Exception:
-                fetched = []
-            for row in fetched:
-                try:
-                    rows.append({
-                        "id": str(row["id"] or ""),
-                        "group": str(row["group_id"] or ""),
-                        "sender": str(row["sender"] or ""),
-                        "content": str(row["content"] or ""),
-                        "sent_at": str(row["sent_at"] or ""),
-                        "kind": str(row["kind"] or "text"),
-                    })
-                except Exception:
-                    continue
-        report = organize(role_def.id, rows)
+        outcome = dict(self.role_analyzer(role_def.id, message_ids) or {})
+        if outcome.get("error"):
+            # "没有新消息"不是失败：这一批该角色已经分析完了（水位线到头）。
+            # 以前这里直接报错，于是**重启之后**商户既看不到上次那份报告
+            # （它只存在内存里），重跑又被判失败 —— 钱花了，报告拿不回来。
+            stored = self._stored_role_report(role_def.id)
+            if str(outcome.get("error")) == "没读到消息" and stored:
+                self._log(f"本次没有新消息，「{role_def.name}」显示上次生成的报告")
+                summary = self._role_summary(role_def, str(stored.get("summary") or ""),
+                                             int(stored.get("total") or 0),
+                                             reused_from_store=True)
+                self._go(WizardStep.RESULTS)
+                return summary
+            raise RuntimeError(str(outcome["error"]))
+        if outcome.get("cancelled"):
+            raise RuntimeError("AI 整理已取消。")
+        report_text = str(outcome.get("summary") or "").strip()
+        if not report_text:
+            raise RuntimeError("本次没有可供 AI 分析的新消息。")
+        summary = self._role_summary(role_def, report_text,
+                                     int(outcome.get("message_count") or 0),
+                                     outcome=outcome)
+        self._log(f"AI 整理完成（{role_def.name}）：处理 {summary['processed']} 条消息")
+        self._go(WizardStep.RESULTS)
+        return summary
+
+    def _stored_role_report(self, role_id: str) -> dict[str, Any] | None:
+        """这个角色上次落盘的报告。读不到就当没有（表还没建、库是旧的）。"""
+        from . import summary_task
+
         try:
-            self.orders().mark_role_organized(
-                self.tenant, [row["id"] for row in rows], role_def.id)
+            return summary_task.load_role_report(self.orders(), self.tenant, role_id)
         except Exception:
-            pass
-        summary = {
-            "processed": len(rows),
+            LOGGER.debug("read stored role report failed", exc_info=True)
+            return None
+
+    def _role_summary(self, role_def: Any, report_text: str, processed: int, *,
+                      outcome: Mapping[str, Any] | None = None,
+                      reused_from_store: bool = False) -> dict[str, Any]:
+        """角色报告的汇总。**报告正文与条数只从这里出**，落盘复用和现跑共用一条路。"""
+        result = dict(outcome or {})
+        partial_error = str(result.get("partial_error") or "")
+        role_report = {
+            "role_id": role_def.id,
+            "role_name": role_def.name,
+            "total": processed,
+            "summary": report_text,
+            "sections": list(role_def.result_sections),
+            "group_reports": list(result.get("group_reports") or []),
+            "partial_error": partial_error,
+        }
+        return {
+            "processed": processed,
             "with_result": 0,
-            "needs_review": len(rows),
+            "needs_review": 0,
             "ignored": 0,
-            "already_analyzed": self.already_analyzed_count(),
-            "submitted_jobs": 0,
-            "charged_micro_usd": 0,
+            # 订单链路那个"已整理过"概念对报告角色不成立（它只认订单解析过的
+            # 消息）。以前这里填订单的数字，界面就写"已整理过、本次没重复提交 N 条"
+            # —— 对活动/通用整理是假话。None = 不适用，页面不显示这一句。
+            "already_analyzed": None,
+            # 任务数/扣费同样只由账号侧结算：不知道就写 None，不写 0 假装没花钱。
+            "submitted_jobs": None,
+            "charged_micro_usd": None,
             "billing": [],
-            "billing_note": "本机规则整理，不调用模型、不扣费、不建单，结果只进人工核对。",
+            "billing_note": "本轮调用 AI，实际用量按当前账号规则结算。",
             "traces": [],
             "role_id": role_def.id,
             "role_name": role_def.name,
-            "role_report": report.to_dict(),
+            "uses_model": True,
+            "output_kind": role_def.output_kind,
+            "sections": list(role_def.result_sections),
+            "cost": result.get("cost"),
+            "is_incremental": bool(result.get("is_incremental", True)),
+            "reused_from_store": bool(reused_from_store),
+            "partial_error": partial_error,
+            "role_report": role_report,
         }
-        self._log(f"整理完成（{role_def.name}）：{report.headline()}")
-        self.finish()
-        return summary
 
     def _pending_message_ids(self) -> list[str]:
         """待处理的消息，已按合并关系过滤，并**排除已分析过的**。
@@ -736,36 +979,46 @@ class Wizard:
     # ------------------------------------------------------------- ⑥ 完成
 
     def finish(self) -> None:
+        """结束向导：记下「走完了」，回首页。只有「回到首页」该调它。"""
         self.settings.wizard_complete = True
         self.save()
         self._go(WizardStep.DONE)
 
-    def needs_wizard(self, account_id: str = "") -> bool:
-        """是否需要重新走向导。
+    def has_finished(self) -> bool:
+        """向导走完过没有。界面据此决定"有没有一个首页可以回"。
 
-        正常情况下不重走。只有首次启动、或微信账号换了才重走。
+        第一次用的商户没有首页可言（首页上什么都没有），所以「再读一次」
+        之后不能给他摆一个「回到首页」；走完过的商户必须有 —— 否则他点了
+        「再读一次」改主意，就只能在向导里一路读下去才回得去。
         """
-        if not self.settings.wizard_complete:
-            return True
-        if account_id and self.settings.account_id and account_id != self.settings.account_id:
-            return True
-        return False
+        return bool(self.settings.wizard_complete)
 
     def restore(self) -> bool:
-        """从设置恢复。返回是否成功进入首页。"""
-        if self.settings.live_conversation:
-            restored = ConversationRegistry.from_dict(
-                {
-                    "history": self.settings.history_conversations,
-                    "live": self.settings.live_conversation,
-                },
-                self.conversations.available,
-            )
-            if restored.live_selected is not None:
-                self.conversations = restored
-                self.step = WizardStep.DONE
-                return True
-        return False
+        """把设置里存的会话绑定装回注册表；返回有没有装回来。**不动当前步骤。**
+
+        启动从登录前置页开始（见 :meth:`first_step`），但这个绑定还得装：
+        第 1 步要把上次勾过的会话显示成已勾选，否则"从头看一眼"就变成了
+        "重新挑一遍群"。
+
+        **必须在会话列表刷新之后调**（``web_server.create_server`` 就是这个顺序）：
+        绑定按 ``identity`` 还原，列表还是空的时候一个都对不上。
+
+        一个都对不上就**不算恢复成功**：换了微信账号、群被删了都会这样，
+        那时该老老实实重选，而不是假装还记得。
+        """
+        if not (self.settings.history_conversations or self.settings.live_conversation):
+            return False
+        restored = ConversationRegistry.from_dict(
+            {
+                "history": self.settings.history_conversations,
+                "live": self.settings.live_conversation,
+            },
+            self.conversations.available,
+        )
+        if not restored.history_selected and restored.live_selected is None:
+            return False
+        self.conversations = restored
+        return True
 
 
 def _network_or_login(exc: Exception) -> str:
@@ -790,6 +1043,7 @@ def _network_or_login(exc: Exception) -> str:
 
 
 __all__ = [
+    "NO_CONVERSATION_SELECTED",
     "QuotaBlocked",
     "QuotaView",
     "Wizard",

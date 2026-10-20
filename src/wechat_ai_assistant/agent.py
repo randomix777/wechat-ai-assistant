@@ -17,54 +17,6 @@ _UI_OPERATION_LOCK = threading.RLock()
 
 
 @dataclass(frozen=True)
-class AgentCommand:
-    command_id: str
-    action: str
-    target: str
-    payload: Mapping[str, Any] = field(default_factory=dict)
-    max_attempts: int = 3
-    retryable: bool = False
-    created_at: float = field(default_factory=time.time)
-
-    def __post_init__(self):
-        if not self.command_id or not self.action or not self.target:
-            raise ValueError("command_id, action and target are required")
-        if self.max_attempts < 1:
-            raise ValueError("max_attempts must be positive")
-        object.__setattr__(self, "payload", dict(self.payload or {}))
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "command_id": self.command_id,
-            "action": self.action,
-            "target": self.target,
-            "payload": dict(self.payload),
-            "max_attempts": self.max_attempts,
-            "retryable": self.retryable,
-            "created_at": self.created_at,
-        }
-
-    @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "AgentCommand":
-        return cls(
-            command_id=str(data["command_id"]),
-            action=str(data["action"]),
-            target=str(data["target"]),
-            payload=data.get("payload", {}),
-            max_attempts=int(data.get("max_attempts", 3)),
-            retryable=bool(data.get("retryable", False)),
-            created_at=float(data.get("created_at", time.time())),
-        )
-
-
-@dataclass(frozen=True)
-class OutboxLease:
-    command: AgentCommand
-    token: str
-    attempt: int
-
-
-@dataclass(frozen=True)
 class AgentConfig:
     group: str
     db_path: str = "agent.db"
@@ -144,27 +96,9 @@ class AgentStore:
                     next_attempt_at REAL, last_error TEXT, updated_at REAL NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS business_uploads_ready ON business_uploads(status,next_attempt_at,updated_at);
-                CREATE TABLE IF NOT EXISTS outbox (
-                    command_id TEXT PRIMARY KEY,
-                    action TEXT NOT NULL,
-                    target TEXT NOT NULL,
-                    payload TEXT NOT NULL,
-                    max_attempts INTEGER NOT NULL,
-                    retryable INTEGER NOT NULL,
-                    status TEXT NOT NULL,
-                    attempts INTEGER NOT NULL DEFAULT 0,
-                    next_attempt_at REAL,
-                    lease_until REAL,
-                    lease_token TEXT,
-                    last_error TEXT,
-                    created_at REAL NOT NULL,
-                    updated_at REAL NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS outbox_ready ON outbox(status, next_attempt_at, created_at);
                 """
             )
             for statement in (
-                "ALTER TABLE outbox ADD COLUMN lease_token TEXT",
                 "ALTER TABLE event_uploads ADD COLUMN max_attempts INTEGER NOT NULL DEFAULT 10",
                 "ALTER TABLE event_uploads ADD COLUMN lease_until REAL",
                 "ALTER TABLE event_uploads ADD COLUMN lease_token TEXT",
@@ -409,319 +343,6 @@ class AgentStore:
                 ).fetchone()
         return int(row["count"])
 
-    def enqueue(self, command: AgentCommand) -> bool:
-        now = self._clock()
-        with self._lock, self._connection:
-            cursor = self._connection.execute(
-                """
-                INSERT OR IGNORE INTO outbox(
-                    command_id, action, target, payload, max_attempts,
-                    retryable, status, attempts, next_attempt_at,
-                    lease_until, last_error, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 'queued', 0, ?, NULL, NULL, ?, ?)
-                """,
-                (
-                    command.command_id,
-                    command.action,
-                    command.target,
-                    json.dumps(dict(command.payload), ensure_ascii=False, default=str),
-                    command.max_attempts,
-                    int(command.retryable),
-                    now,
-                    now,
-                    now,
-                ),
-            )
-            return cursor.rowcount == 1
-
-    def get_command(self, command_id: str) -> dict[str, Any] | None:
-        with self._lock:
-            row = self._connection.execute(
-                """
-                SELECT command_id, action, target, payload, max_attempts,
-                       retryable, status, attempts, last_error
-                FROM outbox WHERE command_id = ?
-                """,
-                (command_id,),
-            ).fetchone()
-        if row is None:
-            return None
-        return {
-            "command_id": row["command_id"],
-            "action": row["action"],
-            "target": row["target"],
-            "payload": json.loads(row["payload"]),
-            "max_attempts": int(row["max_attempts"]),
-            "retryable": bool(row["retryable"]),
-            "status": row["status"],
-            "attempts": int(row["attempts"]),
-            "last_error": row["last_error"] or "",
-        }
-
-    def claim_outbox(self, limit: int = 10, lease_seconds: float = 60) -> list[AgentCommand]:
-        return [lease.command for lease in self.claim_outbox_leases(limit, lease_seconds)]
-
-    def claim_outbox_leases(self, limit: int = 10, lease_seconds: float = 60) -> list[OutboxLease]:
-        if limit < 1 or lease_seconds <= 0:
-            return []
-        now = self._clock()
-        leases: list[OutboxLease] = []
-        with self._lock, self._connection:
-            self._connection.execute(
-                """
-                UPDATE outbox
-                SET status = CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'queued' END,
-                    lease_until = NULL, lease_token = NULL, updated_at = ?
-                WHERE status = 'processing' AND (lease_until IS NULL OR lease_until < ?)
-                """,
-                (now, now),
-            )
-            rows = self._connection.execute(
-                """
-                SELECT * FROM outbox
-                WHERE attempts < max_attempts
-                  AND (status = 'queued' OR (status = 'failed' AND retryable = 1))
-                  AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-                ORDER BY created_at, command_id
-                LIMIT ?
-                """,
-                (now, limit),
-            ).fetchall()
-            for row in rows:
-                token = uuid4().hex
-                cursor = self._connection.execute(
-                    """
-                    UPDATE outbox
-                    SET status = 'processing', attempts = attempts + 1,
-                        lease_until = ?, lease_token = ?, updated_at = ?
-                    WHERE command_id = ? AND status IN ('queued', 'failed')
-                    """,
-                    (now + lease_seconds, token, now, row["command_id"]),
-                )
-                if cursor.rowcount:
-                    command = AgentCommand(
-                        command_id=row["command_id"],
-                        action=row["action"],
-                        target=row["target"],
-                        payload=json.loads(row["payload"]),
-                        max_attempts=int(row["max_attempts"]),
-                        retryable=bool(row["retryable"]),
-                        created_at=float(row["created_at"]),
-                    )
-                    leases.append(OutboxLease(command=command, token=token, attempt=int(row["attempts"]) + 1))
-        return leases
-
-    def release_lease(self, command_id: str, lease_token: str) -> bool:
-        now = self._clock()
-        with self._lock, self._connection:
-            cursor = self._connection.execute(
-                "UPDATE outbox SET status = 'queued', lease_until = NULL, lease_token = NULL, updated_at = ? WHERE command_id = ? AND status = 'processing' AND lease_token = ?",
-                (now, command_id, lease_token),
-            )
-            return cursor.rowcount == 1
-
-    def complete(self, command_id: str, lease_token: str | None = None) -> bool:
-        now = self._clock()
-        with self._lock, self._connection:
-            if lease_token is None:
-                cursor = self._connection.execute(
-                    "UPDATE outbox SET status = 'succeeded', lease_until = NULL, lease_token = NULL, last_error = NULL, updated_at = ? WHERE command_id = ? AND status IN ('queued', 'failed')",
-                    (now, command_id),
-                )
-            else:
-                cursor = self._connection.execute(
-                    "UPDATE outbox SET status = 'succeeded', lease_until = NULL, lease_token = NULL, last_error = NULL, updated_at = ? WHERE command_id = ? AND status = 'processing' AND lease_token = ?",
-                    (now, command_id, lease_token),
-                )
-            return cursor.rowcount == 1
-
-    def fail(self, command_id: str, error: str, retry_delay: float = 5.0, lease_token: str | None = None) -> bool:
-        now = self._clock()
-        message = str(error)[:1000]
-        with self._lock, self._connection:
-            row = self._connection.execute(
-                "SELECT attempts, max_attempts, retryable FROM outbox WHERE command_id = ?",
-                (command_id,),
-            ).fetchone()
-            if row is None:
-                return False
-            retry = bool(row["retryable"]) and int(row["attempts"]) < int(row["max_attempts"])
-            status = "queued" if retry else "failed"
-            next_attempt = now + max(0.0, retry_delay) if retry else None
-            if lease_token is None:
-                cursor = self._connection.execute(
-                    "UPDATE outbox SET status = ?, next_attempt_at = ?, lease_until = NULL, lease_token = NULL, last_error = ?, updated_at = ? WHERE command_id = ? AND status IN ('queued', 'failed')",
-                    (status, next_attempt, message, now, command_id),
-                )
-            else:
-                cursor = self._connection.execute(
-                    "UPDATE outbox SET status = ?, next_attempt_at = ?, lease_until = NULL, lease_token = NULL, last_error = ?, updated_at = ? WHERE command_id = ? AND status = 'processing' AND lease_token = ?",
-                    (status, next_attempt, message, now, command_id, lease_token),
-                )
-            return cursor.rowcount == 1
-
-    def recover_outbox(self) -> int:
-        now = self._clock()
-        with self._lock, self._connection:
-            cursor = self._connection.execute(
-                """
-                UPDATE outbox
-                SET status = CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'queued' END,
-                    lease_until = NULL, lease_token = NULL, updated_at = ?
-                WHERE status = 'processing' AND (lease_until IS NULL OR lease_until < ?)
-                """,
-                (now, now),
-            )
-            return cursor.rowcount
-
-    def pending_count(self) -> int:
-        with self._lock:
-            row = self._connection.execute(
-                "SELECT COUNT(*) AS count FROM outbox WHERE (status IN ('queued', 'processing') OR (status = 'failed' AND retryable = 1)) AND attempts < max_attempts"
-            ).fetchone()
-        return int(row["count"])
-
-    # ------------------------------------------------- receipt outbox states
-    # The outbox gains three states that a *send* needs and a cloud command
-    # does not. They live in this table rather than in a second queue, so a
-    # receipt and a cloud command cannot compete for two different leases and
-    # two different retry budgets.
-
-    def mark_hold(self, command_id: str, reason: str) -> bool:
-        """Park a command until a precondition clears (paused, stale version).
-
-        Held commands are not errors and not attempts: the merchant paused, or
-        the order moved on. They go back to the queue unchanged once the
-        condition clears, so a pause never loses a receipt.
-        """
-        now = self._clock()
-        with self._lock, self._connection:
-            cursor = self._connection.execute(
-                "UPDATE outbox SET status = 'held', last_error = ?, lease_until = NULL, lease_token = NULL, updated_at = ? WHERE command_id = ? AND status IN ('processing', 'queued', 'held')",
-                (str(reason)[:1000], now, command_id),
-            )
-            return cursor.rowcount == 1
-
-    def release_held(self, command_id: str | None = None) -> int:
-        """Return held commands to the queue, e.g. after the merchant un-pauses.
-
-        Prefer :meth:`held_commands` plus a per-command check when the state
-        could have changed while the receipt was held: releasing blindly can
-        send a receipt for a superseded order version.
-        """
-        now = self._clock()
-        with self._lock, self._connection:
-            if command_id is None:
-                cursor = self._connection.execute(
-                    "UPDATE outbox SET status = 'queued', last_error = NULL, next_attempt_at = ?, updated_at = ? WHERE status = 'held'",
-                    (now, now),
-                )
-            else:
-                cursor = self._connection.execute(
-                    "UPDATE outbox SET status = 'queued', last_error = NULL, next_attempt_at = ?, updated_at = ? WHERE command_id = ? AND status = 'held'",
-                    (now, now, command_id),
-                )
-            return cursor.rowcount
-
-    def held_commands(self) -> list[tuple[str, str, dict[str, Any]]]:
-        """``(command_id, target, payload)`` for every held command.
-
-        The product re-validates each one before releasing it, because a
-        receipt can be held for a long time and the world moves on.
-        """
-        with self._lock:
-            rows = self._connection.execute(
-                "SELECT command_id, target, payload FROM outbox WHERE status = 'held' ORDER BY created_at"
-            ).fetchall()
-        result: list[tuple[str, str, dict[str, Any]]] = []
-        for row in rows:
-            try:
-                payload = json.loads(row["payload"])
-            except (TypeError, ValueError):
-                payload = {}
-            result.append((row["command_id"], row["target"], payload if isinstance(payload, dict) else {}))
-        return result
-
-    def held_reasons(self) -> list[tuple[str, str]]:
-        with self._lock:
-            rows = self._connection.execute(
-                "SELECT command_id, last_error FROM outbox WHERE status = 'held' ORDER BY created_at"
-            ).fetchall()
-        return [(row["command_id"], str(row["last_error"] or "")) for row in rows]
-
-    def failed_command_count(self) -> int:
-        """Commands that exhausted their attempts and were not delivered."""
-        with self._lock:
-            row = self._connection.execute(
-                "SELECT COUNT(*) AS count FROM outbox WHERE status = 'failed'"
-            ).fetchone()
-        return int(row["count"] or 0)
-
-    def mark_unknown(self, command_id: str, lease_token: str, reason: str = "") -> bool:
-        """The send was attempted but its result could not be confirmed.
-
-        This is deliberately *not* a retryable failure. Re-sending a receipt we
-        cannot confirm would send the customer a second copy; the command waits
-        for :meth:`reconcile_unknown` to decide.
-        """
-        now = self._clock()
-        with self._lock, self._connection:
-            cursor = self._connection.execute(
-                "UPDATE outbox SET status = 'sent_unknown', retryable = 0, last_error = ?, lease_until = NULL, lease_token = NULL, updated_at = ? WHERE command_id = ? AND status = 'processing' AND lease_token = ?",
-                (str(reason)[:1000], now, command_id, lease_token),
-            )
-            return cursor.rowcount == 1
-
-    def list_unknown(self) -> list[tuple[str, str, str]]:
-        """``(command_id, target, text)`` for every unconfirmed send."""
-        with self._lock:
-            rows = self._connection.execute(
-                "SELECT command_id, target, payload FROM outbox WHERE status = 'sent_unknown' ORDER BY created_at"
-            ).fetchall()
-        result: list[tuple[str, str, str]] = []
-        for row in rows:
-            try:
-                payload = json.loads(row["payload"])
-            except (TypeError, ValueError):
-                payload = {}
-            result.append((row["command_id"], row["target"], str(payload.get("text", ""))))
-        return result
-
-    def unknown_count(self) -> int:
-        with self._lock:
-            row = self._connection.execute(
-                "SELECT COUNT(*) AS count FROM outbox WHERE status = 'sent_unknown'"
-            ).fetchone()
-        return int(row["count"])
-
-    def complete_unknown(self, command_id: str) -> bool:
-        """A verifier confirmed the message really did go out."""
-        now = self._clock()
-        with self._lock, self._connection:
-            cursor = self._connection.execute(
-                "UPDATE outbox SET status = 'succeeded', last_error = NULL, updated_at = ? WHERE command_id = ? AND status = 'sent_unknown'",
-                (now, command_id),
-            )
-            return cursor.rowcount == 1
-
-    def requeue_unknown(self, command_id: str) -> bool:
-        """A verifier confirmed it did *not* go out, so sending is safe again."""
-        now = self._clock()
-        with self._lock, self._connection:
-            cursor = self._connection.execute(
-                "UPDATE outbox SET status = 'queued', attempts = 0, last_error = NULL, next_attempt_at = ?, updated_at = ? WHERE command_id = ? AND status = 'sent_unknown'",
-                (now, now, command_id),
-            )
-            return cursor.rowcount == 1
-
-    def outbox_summary(self) -> dict[str, int]:
-        """Counts per outbox state, for the interface and for tests."""
-        with self._lock:
-            rows = self._connection.execute(
-                "SELECT status, COUNT(*) AS count FROM outbox GROUP BY status"
-            ).fetchall()
-        return {row["status"]: int(row["count"]) for row in rows}
-
     def health(self) -> dict[str, Any]:
         return {
             "state": self.get_state(),
@@ -730,7 +351,6 @@ class AgentStore:
             "pending_uploads": self.pending_upload_count(),
             "pending_business_uploads": self.pending_business_upload_count(),
             "failed_uploads": self.failed_upload_count(),
-            "pending_commands": self.pending_count(),
             "database": self.path,
         }
 
@@ -747,7 +367,6 @@ class LocalAgent:
         history_reader: Callable[..., list[dict[str, Any]]] | None = None,
         dialog_opener: Callable[..., Any] | None = None,
         listener: Callable[..., dict[str, Any]] | None = None,
-        sender: Callable[..., Any] | None = None,
         cloud: Any | None = None,
     ):
         self.config = config
@@ -755,7 +374,6 @@ class LocalAgent:
         self.history_reader = history_reader
         self.dialog_opener = dialog_opener
         self.listener = listener
-        self.sender = sender
         self.cloud = cloud
         self._cloud_error = ""
         self.window_generation = config.window_generation or self.store.get_meta("window_generation") or uuid4().hex
@@ -763,7 +381,6 @@ class LocalAgent:
         if config.window_generation is None:
             self.store.set_meta("window_generation", self.window_generation)
         self._ui_queue = UiOperationQueue(thread_name=f"{config.agent_id}-ui")
-        self._cloud_command_ids: set[str] = set()
         self._owns_store = store is None
 
     def _read_history(self) -> list[dict[str, Any]]:
@@ -834,32 +451,6 @@ class LocalAgent:
             stop_event=stop_event,
             sequence_start=sequence_start,
         )
-
-    def _send(self, command: AgentCommand) -> Any:
-        if command.target not in self.config.allowed_targets:
-            raise PermissionError("command target is not allowed by the agent")
-        sender = self.sender
-        if sender is None:
-            # 界面链已移除：没有注入 sender 就不发。以前这里回退到
-            # 直接操作微信窗口发送（清空草稿、抢焦点），已删除。
-            raise RuntimeError("自动发送已移除：只整理不发送，没有可用的发送实现")
-        if command.action == "send_text":
-            text = str(command.payload.get("text", ""))
-            if not text.strip():
-                raise ValueError("send_text requires text")
-            with _UI_OPERATION_LOCK:
-                return sender(command.target, [text])
-        if command.action == "send_messages":
-            messages = command.payload.get("messages")
-            if not isinstance(messages, list) or not messages:
-                raise ValueError("send_messages requires a non-empty messages list")
-            if any(not isinstance(message, str) or not message.strip() for message in messages):
-                raise ValueError("send_messages requires non-empty text messages")
-            with _UI_OPERATION_LOCK:
-                return sender(command.target, list(messages))
-        if command.action == "noop":
-            return None
-        raise ValueError(f"unsupported command action: {command.action}")
 
     def _record_event(self, event: MessageEvent) -> bool:
         inserted = self.store.record_event(event)
@@ -975,105 +566,6 @@ class LocalAgent:
         self._publish(new_events)
         return len(new_events)
 
-    def _acknowledge_cloud(self, command_id: str, result: Mapping[str, Any]) -> bool:
-        if self.cloud is None:
-            return False
-        try:
-            self.cloud.acknowledge(command_id, dict(result))
-            return True
-        except Exception as exc:
-            self._cloud_error = str(exc)
-            self.store.set_state("degraded", str(exc))
-            return False
-
-    def _reconcile_cloud_command(self, command: AgentCommand, queued: bool) -> None:
-        if self.cloud is None:
-            return
-        self._cloud_command_ids.add(command.command_id)
-        if queued:
-            return
-        existing = self.store.get_command(command.command_id)
-        if existing is None:
-            return
-        if existing["status"] == "succeeded":
-            if self._acknowledge_cloud(command.command_id, {"state": "completed", "result": "already completed"}):
-                self._cloud_command_ids.discard(command.command_id)
-        elif existing["status"] == "failed" and (
-            not existing["retryable"] or existing["attempts"] >= existing["max_attempts"]
-        ):
-            if self._acknowledge_cloud(
-                command.command_id,
-                {"state": "failed", "error": existing["last_error"]},
-            ):
-                self._cloud_command_ids.discard(command.command_id)
-        else:
-            self._acknowledge_cloud(command.command_id, {"state": "queued"})
-
-    def sync_cloud_commands(self, stop_event: threading.Event | None = None) -> int:
-        if self.cloud is None or (stop_event is not None and stop_event.is_set()):
-            return 0
-        try:
-            items = self.cloud.fetch_commands()
-        except Exception as exc:
-            self._cloud_error = str(exc)
-            self.store.set_state("degraded", str(exc))
-            return 0
-        synced = 0
-        for item in items:
-            try:
-                command = AgentCommand.from_dict(item)
-            except (KeyError, TypeError, ValueError) as exc:
-                command_id = str(item.get("command_id", "")).strip()
-                if command_id:
-                    self._acknowledge_cloud(command_id, {"state": "rejected", "error": str(exc)})
-                continue
-            if command.target not in self.config.allowed_targets:
-                self._acknowledge_cloud(command.command_id, {"state": "rejected", "error": "target not allowed"})
-                continue
-            queued = self.enqueue(command)
-            if queued:
-                synced += 1
-                self._cloud_command_ids.add(command.command_id)
-                self._acknowledge_cloud(command.command_id, {"state": "queued"})
-            else:
-                self._reconcile_cloud_command(command, queued)
-        return synced
-
-    def enqueue(self, command: AgentCommand) -> bool:
-        return self.store.enqueue(command)
-
-    def process_outbox(self, stop_event: threading.Event | None = None) -> int:
-        processed = 0
-        while True:
-            if stop_event is not None and stop_event.is_set():
-                return processed
-            leases = self.store.claim_outbox_leases(limit=1, lease_seconds=300)
-            if not leases:
-                return processed
-            lease = leases[0]
-            if stop_event is not None and stop_event.is_set():
-                self.store.release_lease(lease.command.command_id, lease.token)
-                return processed
-            try:
-                future = self._ui_queue.submit(self._send, lease.command)
-                future.result()
-                if not self.store.complete(lease.command.command_id, lease.token):
-                    continue
-                processed += 1
-                if lease.command.command_id in self._cloud_command_ids:
-                    if self._acknowledge_cloud(lease.command.command_id, {"state": "completed"}):
-                        self._cloud_command_ids.discard(lease.command.command_id)
-            except Exception as exc:
-                if not self.store.fail(lease.command.command_id, str(exc), retry_delay=5, lease_token=lease.token):
-                    continue
-                if lease.command.command_id in self._cloud_command_ids:
-                    current = self.store.get_command(lease.command.command_id)
-                    if current is not None and current["retryable"] and current["attempts"] < current["max_attempts"]:
-                        self._acknowledge_cloud(lease.command.command_id, {"state": "queued", "error": str(exc)})
-                    else:
-                        if self._acknowledge_cloud(lease.command.command_id, {"state": "failed", "error": str(exc)}):
-                            self._cloud_command_ids.discard(lease.command.command_id)
-
     def _summary(
         self,
         history_events: int = 0,
@@ -1102,8 +594,6 @@ class LocalAgent:
             live_count = self.listen_once(stop_event=stop_event)
             if stop_event is not None and stop_event.is_set():
                 return self._summary(history_events=history_count, live_events=live_count)
-            synced_commands = self.sync_cloud_commands(stop_event=stop_event)
-            processed_count = self.process_outbox(stop_event=stop_event)
             if self.store.pending_upload_count():
                 self.store.set_state("degraded", self.store.get_meta("state_error") or "cloud event upload pending")
             elif self._cloud_error:
@@ -1116,7 +606,7 @@ class LocalAgent:
                 except Exception as exc:
                     self._cloud_error = str(exc)
                     self.store.set_state("degraded", str(exc))
-            return self._summary(history_count, live_count, synced_commands, processed_count)
+            return self._summary(history_count, live_count)
         except Exception as exc:
             self.store.set_state("degraded", str(exc))
             if self.cloud is not None:
@@ -1128,7 +618,6 @@ class LocalAgent:
 
     def run_forever(self, stop_event: threading.Event) -> None:
         while not stop_event.is_set():
-            self.store.recover_outbox()
             try:
                 self.run_once(stop_event=stop_event)
             except Exception:

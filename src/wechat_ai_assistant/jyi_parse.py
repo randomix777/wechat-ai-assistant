@@ -286,6 +286,20 @@ def build_order_report_merge_messages(reports: list[str]) -> list[dict[str, Any]
     ]
 
 
+def build_role_report_merge_messages(reports: list[str], role_id: str) -> list[dict[str, Any]]:
+    """Merge role reports as reports, never as if their headings were chat messages."""
+    from .roles import role_report_merge_instruction
+
+    numbered = "\n\n".join(
+        f"分析报告 {index}:\n{str(report or '').strip()}"
+        for index, report in enumerate(reports or [], start=1)
+    )
+    return [
+        {"role": "system", "content": role_report_merge_instruction(role_id)},
+        {"role": "user", "content": "请合并以下同一会话的角色分析报告：\n" + numbered},
+    ]
+
+
 def extract_text(body: Any) -> str:
     """从常见 OpenAI 兼容响应中提取可展示正文。"""
     if not isinstance(body, Mapping):

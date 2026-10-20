@@ -57,6 +57,9 @@ GUARDS: list[tuple[str, str, tuple[str, ...]]] = [
      ("登录后账号条写明是谁", "test_the_window_never_assigns_its_own_session")),
     ("假装", "能登录但永远登不出去",
      ("退出前会先确认", "test_detach_notifies_the_server")),
+    ("假装", "退出登录后还停在原来的流程里，回不到登录页",
+     ("退出登录要回登录页", "test_detach_returns_to_the_login_page",
+      "test_logout_brings_the_merchant_back_to_the_login_page")),
     ("假装", "订单超量却不提示",
      ("test_it_states_how_many_orders_there_are",
       "test_it_no_longer_silently_drops_orders_past_a_limit")),
@@ -68,10 +71,14 @@ GUARDS: list[tuple[str, str, tuple[str, ...]]] = [
 
 
 def scan() -> dict[str, list[tuple[Path, int]]]:
-    """在测试与检查脚本里找断言关键字。"""
+    """在单测里找断言关键字。
+
+    界面已经统一到 Web（``web_server`` + ``web_wizard_page``），原来那个
+    "开真窗口逐项点一遍"的检查脚本跟着 Tk 一起删了 —— 现在界面断言都在
+    ``tests/`` 里，写成断言名即可被这里看到。
+    """
     hits: dict[str, list[tuple[Path, int]]] = {}
     sources = list((ROOT / "tests").glob("test_*.py"))
-    sources.append(ROOT / "examples" / "merchant_ui_check.py")
     for path in sources:
         if not path.is_file():
             continue

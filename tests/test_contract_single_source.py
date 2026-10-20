@@ -123,5 +123,6 @@ class NoDuplicateShapeTests(unittest.TestCase):
                          f"\u8fd8\u6709\u5730\u65b9\u786c\u7f16\u7801\u4e86 item \u5b57\u6bb5\u6e05\u5355\uff1a{offenders}")
 
 
+
 if __name__ == "__main__":
     unittest.main()

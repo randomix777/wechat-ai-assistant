@@ -41,16 +41,7 @@ from wechat_ai_assistant.merging import (  # noqa: E402
     MessageMerger,
 )
 from wechat_ai_assistant.orders import OrderStore  # noqa: E402
-from wechat_ai_assistant.receipts import ReceiptOutbox, ReceiptRequest, ReceiptStatus  # noqa: E402
-from wechat_ai_assistant.runmode import AutoOrderSettings, RunMode  # noqa: E402
-from wechat_ai_assistant.wechat_send import (  # noqa: E402
-    SendHeld,
-    SendVerdict,
-    StaticInspector,
-    TargetState,
-    mark_real_sending_verified,
-    real_sending_available,
-)
+from wechat_ai_assistant.runmode import AutoOrderSettings  # noqa: E402
 from wechat_ai_assistant.wechat_state import SimulatedWeChat, WeChatState  # noqa: E402
 
 NOW = datetime(2026, 9, 25, 12, 0, 0, tzinfo=timezone.utc)
@@ -59,148 +50,6 @@ GROUP = "测试群"
 
 def uid() -> str:
     return uuid.uuid4().hex[:12]
-
-
-# ======================================================= 1. 草稿保护
-
-
-class DraftProtectionTests(unittest.TestCase):
-    """发送前必须确认不会破坏用户正在输入的内容。"""
-
-    def test_real_sending_is_off_until_verified(self):
-        mark_real_sending_verified(False)
-        self.addCleanup(mark_real_sending_verified, False)
-        self.assertFalse(real_sending_available())
-        sent: list[tuple[str, str]] = []
-        guard = _guard(sent, TargetState(conversation=GROUP, observed=True, window_ready=True), allow_real=False)
-        verdict = guard.send(GROUP, "好的，已记单")
-        self.assertFalse(verdict.ok)
-        self.assertEqual(verdict.reason, SendVerdict.REAL_SENDING_DISABLED)
-        self.assertEqual(sent, [], "未验证前不得真的操作微信")
-
-    def test_non_empty_draft_holds_the_receipt(self):
-        sent: list[tuple[str, str]] = []
-        guard = _guard(sent, TargetState(conversation=GROUP, draft_text="我明天要", observed=True, window_ready=True))
-        verdict = guard.send(GROUP, "好的，已记单")
-        self.assertFalse(verdict.ok)
-        self.assertEqual(verdict.reason, SendVerdict.DRAFT_PRESENT)
-        self.assertEqual(sent, [], "输入框有内容时绝不能发送")
-        self.assertIn("暂缓", verdict.message)
-
-    def test_whitespace_only_draft_does_not_count(self):
-        sent: list[tuple[str, str]] = []
-        guard = _guard(sent, TargetState(conversation=GROUP, draft_text="   \n ", observed=True, window_ready=True))
-        self.assertTrue(guard.send(GROUP, "好的").ok)
-        self.assertEqual(len(sent), 1)
-
-    def test_wrong_conversation_holds(self):
-        sent: list[tuple[str, str]] = []
-        guard = _guard(sent, TargetState(conversation="别的群", observed=True, window_ready=True))
-        verdict = guard.send(GROUP, "好的，已记单")
-        self.assertEqual(verdict.reason, SendVerdict.WRONG_CONVERSATION)
-        self.assertEqual(sent, [])
-
-    def test_unreadable_state_holds(self):
-        """读不到状态就是不能确认，不能确认就不发。"""
-        sent: list[tuple[str, str]] = []
-        guard = _guard(sent, TargetState(observed=False))
-        verdict = guard.send(GROUP, "好的")
-        self.assertEqual(verdict.reason, SendVerdict.STATE_UNKNOWN)
-        self.assertEqual(sent, [])
-
-    def test_account_mismatch_holds(self):
-        sent: list[tuple[str, str]] = []
-        guard = _guard(
-            sent,
-            TargetState(conversation=GROUP, account_id="wxid_other", observed=True, window_ready=True),
-            expected_account="wxid_mine",
-        )
-        verdict = guard.send(GROUP, "好的")
-        self.assertEqual(verdict.reason, SendVerdict.ACCOUNT_MISMATCH)
-        self.assertEqual(sent, [])
-
-    def test_merchant_typing_mid_check_is_noticed(self):
-        """检查通过之后、真正发送之前，商户开始打字了 —— 必须放弃发送。
-
-        这是"不靠先保存再还原"的关键：第二次核对才发现就不发，
-        而不是把用户新打的字覆盖掉。
-        """
-        sent: list[tuple[str, str]] = []
-        states = [TargetState(conversation=GROUP, observed=True, window_ready=True),
-                  TargetState(conversation=GROUP, draft_text="正在打字…", observed=True, window_ready=True)]
-        guard = _guard_sequence(sent, states)
-        verdict = guard.send(GROUP, "好的，已记单")
-        self.assertFalse(verdict.ok)
-        self.assertEqual(verdict.reason, SendVerdict.DRAFT_PRESENT)
-        self.assertEqual(sent, [], "二次核对发现草稿时不得发送")
-
-    def test_clean_target_sends(self):
-        sent: list[tuple[str, str]] = []
-        guard = _guard(sent, TargetState(conversation=GROUP, observed=True, window_ready=True))
-        self.assertTrue(guard.send(GROUP, "好的，已记单：苹果 2箱").ok)
-        self.assertEqual(sent, [(GROUP, "好的，已记单：苹果 2箱")])
-
-    def test_hold_reason_is_reported_to_the_interface(self):
-        guard = _guard([], TargetState(conversation=GROUP, draft_text="x", observed=True, window_ready=True))
-        guard.send(GROUP, "好的", order_id="o_1")
-        self.assertEqual(guard.hold_summary()["o_1"], SendVerdict.DRAFT_PRESENT)
-
-    def test_a_hold_is_not_reported_as_an_unknown_send(self):
-        """没有往微信里打字，所以不是"结果未知"，不需要对账。"""
-        from wechat_ai_assistant.agent import AgentStore
-
-        directory = Path(tempfile.mkdtemp(prefix="pyw-hold-"))
-        try:
-            outbox = ReceiptOutbox(AgentStore(str(directory / "a.db")), sender=lambda t, x: None)
-            outbox.enqueue(ReceiptRequest(order_id="o_1", order_version=1, conversation=GROUP, text="好的"))
-            outcomes = outbox.dispatch(
-                allowed_targets=(GROUP,),
-                send=_raising_guard_hold(),
-            )
-            self.assertEqual(outcomes[0]["status"], ReceiptStatus.HELD)
-            self.assertEqual(outbox.unknown_count(), 0, "暂缓不是结果未知")
-        finally:
-            shutil.rmtree(directory, ignore_errors=True)
-
-
-def _guard(sent, state, expected_account: str = "", allow_real: bool = True):
-    mark_real_sending_verified(allow_real)
-    from wechat_ai_assistant.wechat_send import SafeReceiptSender
-
-    guard = SafeReceiptSender(
-        StaticInspector(state), inner=lambda t, x: sent.append((t, x)),
-        expected_account=expected_account,
-    )
-    return guard
-
-
-def _guard_sequence(sent, states):
-    """按顺序返回状态，用来模拟"检查通过之后商户才开始打字"。"""
-    from wechat_ai_assistant.wechat_send import SafeReceiptSender
-
-    mark_real_sending_verified(True)
-    remaining = list(states)
-
-    class SequenceInspector:
-        def inspect(self, conversation):
-            return remaining.pop(0) if remaining else states[-1]
-
-    return SafeReceiptSender(
-        SequenceInspector(), inner=lambda t, x: sent.append((t, x))
-    )
-
-
-def _raising_guard_hold():
-    def sender(target, text):
-        raise SendHeld(_check(SendVerdict.DRAFT_PRESENT))
-
-    return sender
-
-
-def _check(reason: str):
-    from wechat_ai_assistant.wechat_send import SendCheck
-
-    return SendCheck(False, reason)
 
 
 # ======================================================= 2. 短消息合并
@@ -407,9 +256,60 @@ class MetricDefinitionTests(unittest.TestCase):
         return oid
 
     def test_every_metric_has_a_written_definition(self):
-        for key in ("effective_orders", "actionable", "stock", "payment_claims", "send_errors", "quota"):
+        for key in ("effective_orders", "actionable", "stock", "payment_claims", "quota"):
             self.assertIn(key, METRIC_DEFINITIONS)
             self.assertTrue(METRIC_DEFINITIONS[key].strip())
+
+    def test_the_order_row_says_which_conversation_it_came_from(self):
+        """订单列表要写出处：这一单是从哪个会话来的。
+
+        客户是按**名字**认的（``customers`` 是 ``UNIQUE(merchant_id, name)``），
+        所以「张姐」在批发群和团购群是**同一个人**，两边的单子会算到一起。
+        不写出处，这就是一笔查不清的账 —— 而 ``orders.group_id`` 一直都存着，
+        只是没人往界面上带。
+        """
+        self._order(quantity=2, status="draft")
+        rows = self.builder.effective_orders()
+        self.assertTrue(rows, "先得真有一单")
+        self.assertEqual(rows[0].group, GROUP, "来自哪个会话要跟着订单一起出来")
+        self.assertEqual(rows[0].to_dict()["group"], GROUP, "序列化也要带")
+
+    def test_two_groups_with_the_same_customer_stay_distinguishable(self):
+        """同一个客户名、两个群：列表里能看出这是两笔不同来源的单。"""
+        self._order(quantity=2, status="draft")
+        other = "另一个群"
+        self.store.db.execute(
+            "INSERT INTO imports(id,merchant_id,group_id,source,status,created_at) VALUES(?,?,?,?,?,?)",
+            ("i2_" + uid(), self.tenant, other, "t2-" + uid(), "complete", NOW.isoformat()),
+        )
+        self.store.db.execute(
+            "INSERT INTO messages(id,merchant_id,import_id,group_id,sender,customer_id,content,kind,"
+            "sent_at,sent_at_epoch,observed_at,time_precision,source_id,match_confidence)"
+            " VALUES(?,?,(SELECT id FROM imports WHERE merchant_id=? ORDER BY created_at DESC LIMIT 1),?,?,?,?,?,?,?,?,?,?,?)",
+            ("msg2_" + uid(), self.tenant, self.tenant, other, "张姐", self.customer,
+             "苹果三箱", "text", NOW.isoformat(), NOW.timestamp(), NOW.isoformat(), "exact",
+             "src2-" + uid(), 0.95),
+        )
+        product = self.store.db.execute(
+            "SELECT id,price_cents,unit FROM products WHERE merchant_id=? AND sku=?", (self.tenant, "APL")
+        ).fetchone()
+        oid = "o2_" + uid()
+        self.store.db.execute(
+            "INSERT INTO orders(id,merchant_id,customer_id,group_id,status,delivery_date,source_import_id,"
+            "created_at,updated_at,version,change_type,history_order_id,business_at_epoch)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (oid, self.tenant, self.customer, other, "draft", "2026-09-26", None,
+             NOW.isoformat(), NOW.isoformat(), 1, "new", None, NOW.timestamp()),
+        )
+        self.store.db.execute(
+            "INSERT INTO order_items(id,order_id,product_id,quantity,unit,unit_price_cents) VALUES(?,?,?,?,?,?)",
+            ("i2_" + uid(), oid, product["id"], 3, product["unit"], product["price_cents"]),
+        )
+        self.store.db.commit()
+        rows = self.builder.effective_orders()
+        by_group = {row.group: row.customer for row in rows}
+        self.assertEqual(by_group, {GROUP: "张姐", other: "张姐"},
+                         "同一个客户名的两笔单，来源必须分得开")
 
     def test_a_change_does_not_double_count_in_stock(self):
         """改一次量后，旧版本被替代，备货不能变成 2+3=5 箱。"""
@@ -484,204 +384,6 @@ class MetricDefinitionTests(unittest.TestCase):
         self.assertNotIn("draft", ACTIONABLE_STATUSES, "自动记单不是待办")
         self.assertIn("review", ACTIONABLE_STATUSES)
         self.assertIn("cancel_review", ACTIONABLE_STATUSES)
-
-
-# ======================================================= 4. 限流与恢复
-
-
-class HeldReceiptRevalidationTests(unittest.TestCase):
-    """恢复发送时必须逐条重新核对，不能一次性全放。"""
-
-    def setUp(self):
-        self.dir = Path(tempfile.mkdtemp(prefix="pyw-held-"))
-        self.store = OrderStore(str(self.dir / "o.db"))
-        self.merchant = self.store.create_merchant("测试商家")
-        self.tenant = self.merchant["merchant_id"]
-        self.customer = self.store.add_customer(self.tenant, "张姐", "张姐", GROUP)
-        self.store.add_product(self.tenant, "APL", "苹果", "箱", 2600, ["苹果"])
-        self.apps = []
-
-    def tearDown(self):
-        for app in self.apps:
-            app.close()
-        self.store.close()
-        shutil.rmtree(self.dir, ignore_errors=True)
-
-    def make_app(self):
-        app = MerchantApplication(
-            data_dir=self.dir, orders=self.store, tenant=self.tenant,
-            probe=SimulatedWeChat([WeChatState.LOGGED_IN]),
-            conversation_source=SimulatedConversations([(GROUP, ConversationKind.GROUP, 128)]),
-            history_reader_fn=SimulatedHistory(default_count=0),
-            simulated=True,
-        )
-        app.attach(object(), _Client(), _Parse(), backend_is_model=False)
-        app.choose_live_conversation(app.refresh_conversations()[0])
-        self.apps.append(app)
-        return app
-
-    def _queue(self, app, order_id, version, conversation=GROUP):
-        app.outbox.enqueue(
-            ReceiptRequest(order_id=order_id, order_version=version, conversation=conversation, text="好的，已记单")
-        )
-        # 立刻消费掉租约：模拟"发送前被暂停"
-        for lease in app.agent_store.claim_outbox_leases(limit=50, lease_seconds=30):
-            app.agent_store.mark_hold(lease.command.command_id, "paused")
-            app.agent_store.release_lease(lease.command.command_id, lease.token)
-
-    def test_resuming_releases_only_still_valid_receipts(self):
-        app = self.make_app()
-        self._queue(app, "o_new", 3)
-        self._queue(app, "o_stale", 1)
-        app.set_mode(RunMode.AUTO_TAKE)
-        app.set_allow_local_automation(True)
-        app._latest_versions = lambda: {GROUP: 3}
-        released, re_held = app._release_held_validated()
-        self.assertEqual(released, 1, "只放行版本最新的那条")
-        self.assertEqual(re_held, 1, "旧版本必须继续暂缓")
-        reasons = app.outbox.held_reasons()
-        self.assertIn("stale_order_version", reasons.values())
-
-    def test_resuming_in_the_wrong_mode_keeps_everything_held(self):
-        app = self.make_app()
-        self._queue(app, "o_1", 1)
-        app.set_mode(RunMode.BACKGROUND)   # 记单但不发
-        released, re_held = app._release_held_validated()
-        self.assertEqual(released, 0, "后台整理模式不得发送")
-        self.assertEqual(re_held, 1)
-        self.assertIn("mode_or_switch_disabled", app.outbox.held_reasons().values())
-
-    def test_receipts_for_another_conversation_stay_held(self):
-        app = self.make_app()
-        self._queue(app, "o_1", 1, conversation="别的群")
-        app.set_mode(RunMode.AUTO_TAKE)
-        app.set_allow_local_automation(True)
-        released, re_held = app._release_held_validated()
-        self.assertEqual(released, 0)
-        self.assertIn("conversation_not_allowed", app.outbox.held_reasons().values())
-
-
-class DrainBoundTests(unittest.TestCase):
-    """413 的 drain 必须在时间和大小上都封顶。"""
-
-    def test_drain_has_a_time_limit(self):
-        from wechat_ai_assistant import gateway_server
-
-        self.assertGreater(gateway_server.DRAIN_TIMEOUT_SECONDS, 0)
-        self.assertLessEqual(gateway_server.DRAIN_TIMEOUT_SECONDS, 30.0,
-                             "drain 不得无限等待，否则一个慢速请求能占住工作线程")
-
-    def test_drain_has_a_size_limit(self):
-        from wechat_ai_assistant import gateway_server
-
-        self.assertGreater(gateway_server.DRAIN_LIMIT_BYTES, 0)
-
-    def test_slow_body_does_not_hang_the_handler(self):
-        """声明 50MB 却一个字节都不发的客户端，不能把处理线程钉住。"""
-        import shutil as _shutil
-        import socket
-        import tempfile as _tempfile
-        import threading as _threading
-        from http.server import ThreadingHTTPServer
-
-        from wechat_ai_assistant.gateway import ProductGateway
-        from wechat_ai_assistant.gateway_server import GatewayHTTPRequestHandler
-        from wechat_ai_assistant.product import ProductStore
-
-        directory = Path(_tempfile.mkdtemp(prefix="pyw-drain-"))
-        gateway = ProductGateway(ProductStore(str(directory / "p.db")))
-
-        class Handler(GatewayHTTPRequestHandler):
-            pass
-
-        Handler.gateway = gateway
-
-        class Quiet(ThreadingHTTPServer):
-            daemon_threads = True
-
-        server = Quiet(("127.0.0.1", 0), Handler)
-        port = server.server_address[1]
-        thread = _threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            started = time.monotonic()
-            with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
-                client.sendall(
-                    b"POST /v1/order-parse-jobs HTTP/1.1\r\nHost: x\r\n"
-                    b"Content-Type: application/json\r\nContent-Length: 50000000\r\n\r\n"
-                )
-                # 只发头部，一个字节的数据体都不发
-                client.settimeout(25)
-                data = b""
-                try:
-                    while b"\r\n\r\n" not in data:
-                        chunk = client.recv(1024)
-                        if not chunk:
-                            break
-                        data += chunk
-                except socket.timeout:
-                    self.fail("客户端在 25 秒内没有收到任何响应")
-            elapsed = time.monotonic() - started
-            self.assertLess(elapsed, 15.0, "慢速大请求不得拖住处理线程")
-            self.assertIn(b"413", data, "仍应返回 413")
-        finally:
-            server.shutdown()
-            server.server_close()
-            gateway.store.close()
-            _shutil.rmtree(directory, ignore_errors=True)
-
-
-class NoDoubleChargeTests(unittest.TestCase):
-    def test_unknown_outcome_never_re_executes(self):
-        from business_agent import AgentCore, FakeBackend, RunStatus
-        from business_agent.contracts.errors import OutcomeUnknown
-        from business_agent.contracts.request import AgentRequest, AsOf, Budget, Event, Policy, Scope
-        from order_agent import OrderPlugin
-
-        calls: list[int] = []
-
-        class Counting(FakeBackend):
-            def run(self, prompt, request):
-                calls.append(1)
-                raise OutcomeUnknown("断了")
-
-        request = AgentRequest(
-            request_id="r1", idempotency_key="i1", task_type="order_parse",
-            scope=Scope(tenant_id="t"),
-            events=(Event(event_id="e1", body="苹果两箱", occurred_at=NOW),),
-            as_of=AsOf(instant=NOW), policy=Policy(name="p"), budget=Budget(timeout_seconds=5),
-        )
-        core = AgentCore(backend=Counting(), plugin=OrderPlugin())
-        result = core.run(request)
-        self.assertEqual(result.status, RunStatus.OUTCOME_UNKNOWN)
-        self.assertEqual(len(calls), 1, "结果未知不得重复执行，否则会重复计费")
-        # 。Usage.cost_units。是 business_agent 包自己的字段（报告平台实际消耗，
-        # 包注释写明 "The host decides what to charge"），**不是**商户账单。
-        # 把这里改名成商户口径会把「平台花了多少」和「商户被扣多少」混成一件事。
-        self.assertEqual(result.usage.cost_units, 0, "结果未知不产生客户账单")
-
-    def test_timeout_does_not_retry_either(self):
-        from business_agent import AgentCore, FakeBackend, RunStatus
-        from business_agent.contracts.errors import AgentError, ErrorCategory
-        from business_agent.contracts.request import AgentRequest, AsOf, Budget, Event, Policy, Scope
-        from order_agent import OrderPlugin
-
-        calls: list[int] = []
-
-        class TimingOut(FakeBackend):
-            def run(self, prompt, request):
-                calls.append(1)
-                raise AgentError(ErrorCategory.TIMEOUT, "超时")
-
-        request = AgentRequest(
-            request_id="r1", idempotency_key="i1", task_type="order_parse",
-            scope=Scope(tenant_id="t"),
-            events=(Event(event_id="e1", body="苹果两箱", occurred_at=NOW),),
-            as_of=AsOf(instant=NOW), policy=Policy(name="p"), budget=Budget(timeout_seconds=5),
-        )
-        result = AgentCore(backend=TimingOut(), plugin=OrderPlugin()).run(request)
-        self.assertEqual(result.status, RunStatus.OUTCOME_UNKNOWN)
-        self.assertEqual(len(calls), 1)
 
 
 class MessageKindNormalisationTests(unittest.TestCase):
