@@ -15,7 +15,7 @@ import unittest
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
-from wechat_ai_assistant.client_login import MerchantClient, PendingQueue, Session
+from wechat_ai_assistant.client_login import GatewayError, MerchantClient, PendingQueue, Session
 from wechat_ai_assistant.gateway import ProductGateway
 from wechat_ai_assistant.local_parse import LOCAL_BLOCKED, LOCAL_DONE, LOCAL_NEEDS_RETRY, LocalParseService, describe_subscription
 from wechat_ai_assistant.opencode import LocalRuleAdapter
@@ -399,6 +399,28 @@ class LocalParseLoopTests(unittest.TestCase):
         )
         self.assertEqual(len(self.orders.list_orders(self.tenant)), 1)
         self.assertTrue(self.orders.dashboard(self.tenant) is not None)
+
+    def test_upstream_outage_holds_the_message_instead_of_dropping_it(self):
+        """JYI 上游挂掉（额度见底、配额用完、密钥失效）：消息留在队列里，不丢。
+
+        2026-10-20 上游额度见底时，客户端把这类错误当成了"被拒了"，本地队列
+        直接 mark_done —— 商户少了一批消息，界面只显示"分析失败"。上游故障不是
+        商户的错，消息必须留下来等。
+        """
+        message = add_message(self.orders, self.tenant, "群A", "来两箱苹果", self.customer)
+        service = self._service()
+
+        def refuse(*_args, **_kwargs):
+            raise GatewayError("jyi_service_unavailable",
+                               "The AI service is temporarily unavailable.")
+
+        service.client.submit_parse = refuse  # type: ignore[method-assign]
+        progress = service.submit(message["id"])
+        self.assertEqual(progress.state, LOCAL_BLOCKED)
+        self.assertIn("JYI", progress.message, "文案要给得出下一步：联系 JYI")
+        outstanding = self.queue.outstanding()
+        self.assertEqual(len(outstanding), 1, "上游故障时消息必须留在队列里，不能丢掉")
+        self.assertEqual(outstanding[0]["last_error"], "jyi_service_unavailable")
 
     def test_expired_plan_blocks_new_work_with_a_plain_message(self):
         self.store.update_subscription(self.account["account_id"], status="suspended")

@@ -84,6 +84,12 @@ _ERROR_LABELS = {
     # 用这个应用。说成密钥失效会把商户引到错误的方向上去折腾。
     "access_not_approved": "这个账号还没有开通智能整理，请联系 JYI 开通。已经读到的消息一条都没少。",
     "approval_check_unavailable": "暂时无法确认开通状态，请稍后重试或联系 JYI。",
+    # JYI 网关的上游故障。**也不是**商户的问题：网关的上游（订阅 / OpenRouter）
+    # 拒绝了这通调用，通常是那边的额度或配额出了问题。说"稍后重试"会让商户
+    # 一直重试到天亮，而重试并不会好 —— 所以文案里给出真正的下一步：持续失败
+    # 就联系 JYI。"JYI 已收到告警"不是安慰：网关确实为此开了一条 critical 告警。
+    "jyi_service_unavailable": "智能分析服务暂时不可用，请稍后重试；若持续失败请联系 JYI。",
+    "jyi_service_configuration_error": "智能分析服务暂时不可用，JYI 已收到告警；请稍后重试或联系 JYI。",
     "outcome_unknown": STATUS_UNKNOWN,
     "invalid_output": "解析结果异常，请重试",
     "backend_unavailable": STATUS_NETWORK_DOWN,
@@ -114,6 +120,12 @@ HELD_ERRORS = {
     "model_concurrency_limit",
     "pricing_changed",
     "pricing_version_required",
+    # 网关的上游故障（额度/配额/密钥）。跟上面一样：**不是**这条消息的错，
+    # 更不是商户的错 —— 消息必须留在本地队列里等。少了这一条，平台上游一挂，
+    # 客户端就会把这些消息当成"被拒了"直接丢掉（local_parse 里走到
+    # mark_done(rejected)），商户本地就少了一批单子，而商户什么都不知道。
+    "jyi_service_unavailable",
+    "jyi_service_configuration_error",
 }
 
 #: 需要**商户重新确认价格**的错误。客户端只把新事实展示出来，

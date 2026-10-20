@@ -23,6 +23,7 @@ from wechat_ai_assistant.client_login import (
     CredentialStore,
     DeviceLoginFlow,
     GatewayError,
+    HELD_ERRORS,
     LoginError,
     MerchantClient,
     PendingQueue,
@@ -137,6 +138,21 @@ class StatusWordingTests(unittest.TestCase):
         self.assertFalse(should_retry("unsupported_field", attempts=1))
         # Give up eventually so a stuck message cannot retry forever.
         self.assertFalse(should_retry("network_unavailable", attempts=99))
+
+    def test_an_upstream_outage_is_held_not_dropped(self):
+        """网关上游故障：不是商户的错，消息必须留在本地队列里等。
+
+        少了这一条，JYI 上游一挂（额度用完、配额用完、密钥失效），客户端就
+        会走到 `mark_done(rejected)`：商户本地少了一批消息，而商户什么都不知道
+        ——界面只显示"分析失败"。2026-10-20 上游额度见底时正是这条。
+        """
+        for code in ("jyi_service_unavailable", "jyi_service_configuration_error"):
+            with self.subTest(code=code):
+                self.assertIn(code, HELD_ERRORS, "上游故障必须留在队列里等，不能丢掉消息")
+                label = status_label("held", code)
+                self.assertIn("JYI", label, "文案要给得出下一步：联系 JYI")
+                for term in ("密钥", "额度", "token", "api key", "provider"):
+                    self.assertNotIn(term, label.lower(), f"{label!r} 把上游的事推给了商户")
 
 
 class PendingQueueTests(unittest.TestCase):
