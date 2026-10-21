@@ -126,6 +126,12 @@ HELD_ERRORS = {
     # mark_done(rejected)），商户本地就少了一批单子，而商户什么都不知道。
     "jyi_service_unavailable",
     "jyi_service_configuration_error",
+    # 开通闸门**查不到**的时候也是平台的问题，不是商户的：网关暂时查不了
+    # 批准记录（503），不等于这个账号没被批准。原来这一条只在 _ERROR_LABELS
+    # 里（有一句像样的文案），却漏在了 HELD_ERRORS 外面 —— 于是闸门一查不通，
+    # 客户端就把消息当成"被拒了"丢掉，商户本地少了一批单子，而商户只看到一句
+    # "暂时无法确认开通状态"。平台自己的故障，不该由商户的消息来承担。
+    "approval_check_unavailable",
 }
 
 #: 需要**商户重新确认价格**的错误。客户端只把新事实展示出来，

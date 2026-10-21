@@ -422,6 +422,28 @@ class LocalParseLoopTests(unittest.TestCase):
         self.assertEqual(len(outstanding), 1, "上游故障时消息必须留在队列里，不能丢掉")
         self.assertEqual(outstanding[0]["last_error"], "jyi_service_unavailable")
 
+    def test_a_gateway_that_cannot_check_the_approval_does_not_drop_the_message(self):
+        """查不到批准状态是平台的问题，不是商户的 —— 消息必须留着。
+
+        闸门暂时查不通（503 approval_check_unavailable）和上游挂了是同一类事：
+        平台自己的故障。它原来只有一句像样的文案，却漏在 HELD_ERRORS 外面，
+        于是客户端走到 mark_done(rejected)，商户本地少了一批消息，而商户只看到
+        一句"暂时无法确认开通状态"。
+        """
+        message = add_message(self.orders, self.tenant, "群A", "来两箱苹果", self.customer)
+        service = self._service()
+
+        def refuse(*_args, **_kwargs):
+            raise GatewayError("approval_check_unavailable",
+                               "The approval state could not be read.")
+
+        service.client.submit_parse = refuse  # type: ignore[method-assign]
+        progress = service.submit(message["id"])
+        self.assertEqual(progress.state, LOCAL_BLOCKED)
+        outstanding = self.queue.outstanding()
+        self.assertEqual(len(outstanding), 1, "平台查不到批准状态时，消息必须留在队列里")
+        self.assertEqual(outstanding[0]["last_error"], "approval_check_unavailable")
+
     def test_expired_plan_blocks_new_work_with_a_plain_message(self):
         self.store.update_subscription(self.account["account_id"], status="suspended")
         self.session.subscription = self.store.get_subscription(self.account["account_id"])
