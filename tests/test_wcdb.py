@@ -6,7 +6,7 @@
 * display_name：备注优先，其次昵称；
 * read_sessions/read_all_groups/read_all_friends：映射、人数、排序；
 * WcdbReader：缺钥匙/缺文件/验签失败都报不可用，不抛别的错；
-* RealConversationSource：解密路优先，失败回落内存路。
+* RealConversationSource：解密路优先，失败/没钥匙时返回空名单（内存兜底已删除）。
 """
 from __future__ import annotations
 
@@ -263,15 +263,16 @@ class SourcePriorityTests(unittest.TestCase):
         self.assertEqual([(c.name, c.member_count, c.wxid) for c in got],
                          [("真群", 128, "g@chatroom")])
 
-    def test_wcdb_failure_falls_back(self):
+    def test_wcdb_failure_lists_nothing(self):
+        """内存 carve 兜底已删除：解密库不可用就列不出会话，不静默换一条路。"""
+
         def boom(kind):
             raise WcdbUnavailable("没钥匙")
 
         source = RealConversationSource(ui_lock=None, wcdb_fn=boom)
-        with unittest.mock.patch("wechat_ai_assistant.localdb.list_group_conversations",
-                                 return_value=[("内存群", "m@chatroom")]):
-            got = source.list_conversations(ConversationKind.GROUP)
-        self.assertEqual([(c.name, c.wxid) for c in got], [("内存群", "m@chatroom")])
+        got = source.list_conversations(ConversationKind.GROUP)
+        self.assertEqual(got, ())
+        self.assertEqual(source.last_source, "")
 
 
 def _encrypt_page(body: bytes, pgno: int, salt: bytes, iv: bytes) -> bytes:

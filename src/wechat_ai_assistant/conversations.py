@@ -177,23 +177,21 @@ class ConversationSource(Protocol):
 class RealConversationSource:
     """真实微信会话列举，不碰微信窗口。
 
-    两条路，按顺序试：
-    1. 解密库（``wcdb_fn``）：最近会话 + 全量群名 + 人数 + 通讯录好友，全是真名；
-    2. 内存 carve（``localdb``）：无钥匙兜底，只能捡到群（名还不全），没有好友。
+    一条路：解密库（``wcdb_fn``）：最近会话 + 全量群名 + 人数 + 通讯录好友，全是真名。
 
-    界面链已移除：以前的第 3 条路（界面通讯录）和好友 UIA 名单都没有了。
-    没钥匙时好友选不到 —— 界面照实说，先提密钥。
-    任何一条失败都不致命：能列多少列多少，界面会如实说明来源。
+    界面链已移除：以前的第 3 条路（界面通讯录）和好友 UIA 名单都没有了；
+    内存 carve 兜底也已删除：没钥匙时连群都列不出来 —— 界面照实说，先提密钥。
+    解密库失败（没密钥、文件锁、验签不过）不致命：能列多少列多少，界面会如实说明来源。
     """
 
     def __init__(self, ui_lock: Any = None,
                  wcdb_fn: Callable[[str], Sequence[Any] | None] | None = None):
         self._ui_lock = ui_lock
         #: 解密库会话来源（应用层注入，缺密钥时为 None）。抛异常=不可用，
-        #: 这里吞掉回落内存路，不把整次列举带崩。
+        #: 这里吞掉返回空名单，不把整次列举带崩。
         self.wcdb_fn = wcdb_fn
         #: 上一次列举**实际用的是哪条路**：``wcdb``（解密库，真名真人数）/
-        #: ``memory``（内存扫描，只有群、名字还不全）/ 空串（没列过）。
+        #: 空串（没列出来 —— 没钥匙或解密库没给）。
         #: 界面必须知道这个 —— 否则商户看到残缺名单，只会以为软件坏了。
         self.last_source = ""
 
@@ -204,11 +202,9 @@ class RealConversationSource:
             return function(*args, **kwargs)
 
     def list_conversations(self, kind: str = "") -> tuple[Conversation, ...]:
-        from . import localdb
-
         found: list[Conversation] = []
         if self.wcdb_fn is not None:
-            # 解密库优先：真名 + 人数 + 最近时间，一次到位。
+            # 解密库：真名 + 人数 + 最近时间，一次到位。
             # 失败（没密钥、文件锁、验签不过）就当没这条路。
             try:
                 rows = self._guarded(self.wcdb_fn, kind) or ()
@@ -241,19 +237,8 @@ class RealConversationSource:
             if found:
                 self.last_source = "wcdb"
                 return disambiguate(found)
-        memory_groups: list[tuple[str, str]] = []
-        if kind in ("", ConversationKind.GROUP):
-            # 内存兜底：不碰微信窗口，只能捡到最近碰过的群，名还不全。
-            # 人数读不到填 0，界面照群显示，不写"联系人"。
-            try:
-                memory_groups = self._guarded(localdb.list_group_conversations) or []
-            except Exception:
-                memory_groups = []
-            for name, wxid in memory_groups:
-                found.append(Conversation(name=str(name), kind=ConversationKind.GROUP,
-                                          member_count=0, wxid=str(wxid)))
-        # 好友没有内存形态：解密库没给就选不到，界面照实说，先提密钥。
-        self.last_source = "memory" if found else ""
+        # 没钥匙就没有会话可列（群和好友都只在解密库里）——界面照实说，先提密钥。
+        self.last_source = ""
         return disambiguate(found)
 
 

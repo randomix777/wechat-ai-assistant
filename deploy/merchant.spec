@@ -75,7 +75,7 @@ EXCLUDES = [
     "pandas", "matplotlib", "setuptools",
     # The click-automation library: clicking the "send" button, auto-reply,
     # auto-add-friend. The product does not use it -- reading goes through the
-    # local decrypted database (localdb / wcdb) and nothing in the product
+    # local decrypted database (wcdb) and nothing in the product
     # writes to WeChat -- and it must not reach the merchant's machine.
     #
     # "This tool does not send messages on my behalf" has to be a fact about

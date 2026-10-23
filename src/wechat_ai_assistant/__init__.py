@@ -29,7 +29,7 @@ ensure_packages_on_path()
 #: ``from wechat_ai_assistant import Messages`` 一下，PyInstaller 就会把它收进
 #: 制品。于是"这个工具不会替我给别人发微信"就从**事实**退回成**承诺**。
 #:
-#: 所以这里不再导出它们。读消息走本机解密库（``localdb`` / ``wcdb``），导航走
+#: 所以这里不再导出它们。读消息走本机解密库（``wcdb``），导航走
 #: ``.WeChatTools``，都不需要那一套。
 _EXPORTS = {
     "Tools": ".WeChatTools", "Navigator": ".WeChatTools",
