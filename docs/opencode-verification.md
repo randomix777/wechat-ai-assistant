@@ -33,6 +33,12 @@
 | V19 | `experimental.policies` 条目形状为 `{action, resource, effect}`，`action` 目前仅 `"provider.use"`，`effect` 为 `allow`/`deny`，**后者匹配优先**。**只 deny 不 allow 会让所有 provider 不可用，导致自我锁死** | config.json + docs/policies |
 | V20 | **没有** `mcp: false` 之类的总开关；`"mcp": {}` 因为配置是**合并而非替换**而是无效手段 | config.json + docs/config |
 | V21 | 会话数据位于数据目录下的 SQLite，可用 `OPENCODE_DB` 指定 | 源码 + docs/troubleshooting |
+| V22 | **后端不发系统提示词**：`build_agent_prompt` 造出来的是 `PromptPackage(system="")`，`render_prompt` 只把载荷包成"这是数据"的 JSON 文档。agent 的系统提示词**只可能**来自 agent 定义（markdown 正文或配置里的 prompt 字段） | src/wechat_ai_assistant/opencode.py + packages/business_agent/backends/opencode.py 源码 |
+| V23 | 私有实例里 `order-parse` **必须**有 markdown 文件，否则模型收到零指令：实例照样返回 200、模型照样应答，只是输出完全不对 | 源码 + 实例实测（`GET /agent` 的 `prompt` 字段） |
+| V24 | 配置里声明的 provider 会**覆盖**同名目录项（`source=config`），模型清单是两者**并集** | 1.18.18 实例实测（`GET /provider`） |
+| V25 | models.dev 里 `opencode-go` 的目录是**旧的**：29 个模型，**没有** `qwen3.6-plus`，也没有 baseURL。`qwen3.6-plus` 在 `opencode` 那个 provider 底下。所以"继承目录"必然报 `Model not found: opencode-go/qwen3.6-plus. Did you mean: qwen3.6-plus?` | 1.18.18 实例实测（空配置 + 无凭据） |
+| V26 | `GET /provider` 的 `connected` 是**按环境变量名**决定的：models.dev 的 provider 目录写着 `env:['OPENROUTER_API_KEY']` 之类，凭据在环境里就"已连接"。**空配置 + 无凭据**的实例也会列出 agnes / openrouter —— 所以"provider 列表"不能当隔离证据 | 1.18.18 实例实测（空配置 + 无凭据 vs 带凭据） |
+| V27 | 实例启动时会为**每一份它加载过的配置**打印 `message=loading path="..."`，写在自己的结构化日志里。隔离的最硬证据就是这个：所有路径都在私有目录里 | 实例日志实测 |
 
 ---
 

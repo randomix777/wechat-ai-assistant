@@ -415,21 +415,65 @@ platform budget: {"daily_paid_jobs": 40, "paid_jobs_today": 0,
 
 ### 真实上游
 
-**本轮仍然没有跑过真实模型。** 之前那一次（OpenCode 1.18.18 +
-`opencode-go/qwen3.6-plus`，能力验证 5/5）是在第 10 节第 1 条缺陷**存在**的
-时候跑的：请求体里根本没有 `model` 字段，实际执行用的是 OpenCode 侧 agent
-配置里钉死的模型。本机 `~/.config/opencode/opencode.json` 里
-`agent.order-parse.model` 正是 `opencode-go/qwen3.6-plus` —— 所以那次
-「验证通过」验证的是 agent 配的那个模型，**不**证明"客户选哪个模型就执行
-哪个模型"。
+**本轮跑通了真实模型。** 但先说清楚之前那次为什么作废，因为作废的理由本身
+就是这次真正的 bug：
 
-那次结果**作废**。原因不是它错了，而是它测的不是它声称在测的东西。
+之前那次（OpenCode 1.18.18 + `opencode-go/qwen3.6-plus`，能力验证 5/5）是在
+第 10 节第 1 条缺陷**存在**的时候跑的：请求体里根本没有 `model` 字段，实际
+执行用的是 OpenCode 侧 agent 配置里钉死的模型 —— 所以那次「验证通过」验证
+的是 agent 配的那个模型，**不**证明"客户选哪个模型就执行哪个模型"。
 
-本机 `opencode serve --port 4096` 仍在运行（PID 3624，09:21 启动，服务里还有
-godot-ai、blender-mcp、opencodex、openrouter 等其他 provider，是**共享
-服务**）。它要求 HTTP Basic 认证，而密码只存在于那个进程的启动环境里，
-当前会话、用户级环境变量、以及 `~/.config/opencode/` 下的任何配置文件中都
-没有。未重启该服务，也未改动它的凭据。
+这次把私有实例修好之后，真相是：**私有实例上这条链路从来就跑不通**，而且
+是三处独立的问题叠在一起（都已修，见 `examples/prepare_isolated_opencode.py`）：
+
+1. **模型根本解析不出来。** models.dev 里 `opencode-go` 的目录是旧的，29 个
+   模型里**没有** `qwen3.6-plus`，也没有 baseURL。实例日志里留着一手：
+
+   ```
+   ProviderModelNotFoundError: Model not found: opencode-go/qwen3.6-plus.
+   Did you mean: qwen3.6-plus?
+   ```
+
+   （`qwen3.6-plus` 在 `opencode` 那个 provider 底下，不在 `opencode-go` 底下。）
+   修法：私有配置**显式**声明 `opencode-go`（baseURL + 模型清单），不靠继承。
+
+2. **agent 没有系统提示词。** 后端发的是 `PromptPackage(system="")`，
+   提示词只可能来自 agent 的 markdown 文件 —— 而私有实例的 `agents/` 目录
+   当时是空的。模型收到的是**零指令**，实例照样返回 200。
+   修法：`examples/prepare_isolated_opencode.py` 写出
+   `agents/order-parse.md`，正文取自 `order_agent.plugin.SYSTEM_PROMPT`
+   （全仓库唯一一份，由输出结构生成）。
+
+3. **隔离验证自己在骗人。** 脚本声明了 `FORBIDDEN_CONFIG_KEYS` 却从没用过；
+   provider 泄漏名单也是手写死的，而泄漏的真正来源是**环境变量**而不是配置
+   （models.dev 按环境变量名认 provider —— 实测空配置 + 无凭据的实例照样列出
+   agnes / openrouter）。修法：剥掉所有 provider 凭据环境变量，只留
+   `OPENCODE_GO_API_KEY`；隔离判据换成**实例实际加载过哪些配置**（读它自己
+   的日志），不再是"provider 列表看起来对"。
+
+修完之后的实测（走**生产代码路径** `OpenCodeBackend.run`，不是手工拼请求）：
+
+```
+probe ok: True | version: 1.18.18
+run took 22.3s
+model executed : True | reported: opencode-go/qwen3.6-plus
+tokens         : 3669 in / 160 out
+{"intent":"new_order","customer_alias":"张老板","target_order":null,
+ "items":[{"said":"苹果","brand":null,"category":"苹果","sku":"SKU-APPLE-BOX",
+           "quantity":2,"unit":"箱","evidence":["要两箱苹果"]}],
+ "delivery_date":null,"evidence":["要两箱苹果"],"missing_fields":[],
+ "ambiguities":[],"suggested_change":null}
+validate_parse_result OK: True
+contract validate_output: 通过
+```
+
+即：模型**确实**执行了请求里指定的 `opencode-go/qwen3.6-plus`（上游回报的
+模型标识与请求一致），九个字段一个不多一个不少，sku 从目录里认出来了，
+quantity 是 JSON 数字，evidence 是原文整段。
+
+共享实例（本机 `opencode serve --port 4096`，PID 3624，09:21 启动）**未**参与
+本轮：它要求 HTTP Basic 认证，而口令只存在于那个进程的启动环境里。未重启该
+服务，也未改动它的凭据。
 
 ### 本项目的独立实例（已准备并验证隔离）
 
@@ -439,44 +483,58 @@ OpenCode 1.18.18 实例，与共享的 4096 互不影响：
 | 项 | 值 |
 | --- | --- |
 | 地址 | 127.0.0.1:高位随机端口（见 `.opencode-private/instance.json`） |
-| 配置 | `.opencode-private/config/opencode/opencode.json` —— 只有 `order-parse` 一个 agent |
+| 配置 | `.opencode-private/config/opencode/opencode.json` —— 只有 `order-parse` 一个 agent，外加**显式声明**的 `opencode-go` 上游 |
+| agent 提示词 | `.opencode-private/config/opencode/agents/order-parse.md` —— 正文 = `order_agent.plugin.SYSTEM_PROMPT` |
 | 数据 / 缓存 / 应用数据 | `.opencode-private/{data,cache,appdata,state}` |
 | 认证口令 | 随机生成，写入 `.opencode-private/secret.pw`（已 `chmod 600` + `icacls` 收紧） |
 | 启动参数 | `serve --port … --hostname 127.0.0.1 --pure`（`--pure` 不加载外部插件） |
 
 **隔离是实测的，不是假设的**（脚本会先起临时实例、拿 HTTP 响应验证，
-验证不过就停掉并报告）：
+验证不过就停掉并报告）。四条判据，每一条都有反例护在
+`tests/test_isolated_opencode_instance.py` 里：
 
 ```
 health: {'healthy': True, 'version': '1.18.18'}
+loaded_config_paths: ['…\\.opencode-private\\config\\opencode\\config.json',
+                      '…\\.opencode-private\\config\\opencode\\opencode.json',
+                      '…\\.opencode-private\\config\\opencode\\opencode.jsonc']
+                                          ← 实例**实际加载**过的配置，全在私有目录
 agents: ['order-parse']                 ← 没有 build/plan/general/explore
-connected_providers: ['google-vertex', 'google-vertex-anthropic', 'opencode']
-                                         ← 没有 opencodex/openrouter/agnes/godot-ai/blender-mcp
-auth list: 0 credentials（私有 auth.json 路径在 .opencode-private 下）
+order_parse_prompt_chars: 2450         ← 提示词在，且与 SYSTEM_PROMPT 逐字一致
+connected_providers: ['google-vertex', 'google-vertex-anthropic', 'opencode', 'opencode-go']
+                                          ← 没有 opencodex/openrouter/agnes/godot-ai/blender-mcp
 ```
+
+第三条是**从实例自己的日志里读出来的**（`message=loading path="..."`），
+不是从 provider 列表反推 —— 原因见 V26：provider 列表是按环境变量名认人的，
+空配置 + 无凭据的实例也会列出 agnes / openrouter，拿它当隔离证据会得出
+**假阳性**。脚本因此会剥掉所有 provider 凭据环境变量（只留
+`OPENCODE_GO_API_KEY`），并且**读不到日志就算失败** —— 空结果通过等于
+这个检查根本不存在。
 
 `XDG_CONFIG_HOME` / `XDG_DATA_HOME` / `XDG_CACHE_HOME` 加 `APPDATA` /
 `LOCALAPPDATA` / `OPENCODE` 在 1.18.18 上**确实**生效；`auth list` 显示私有
 凭据文件位于私有目录，说明全局凭据库也没有被继承。
 
-### 真实模型重跑仍缺的一步
+### 真实模型：已跑通
 
-私有实例里 **0 个凭据**，因此一次真实调用返回 `HTTP 500`（上游未认证）。
-按约定**不计为通过**，也不重试、不换模型、不换供应商。
+私有实例现在有凭据（`OPENCODE_GO_API_KEY`，与共享实例同一份订阅密钥）和
+提示词，真实调用已经跑通 —— 见上面「真实上游」一节的实测输出。
 
-需要你亲自执行（我不会替你登录、购买额度或更换账号）：
-
-```powershell
-python examples/prepare_isolated_opencode.py --auth-login opencode-go
-```
-
-登录只写进这个私有目录，对共享实例 4096 没有任何影响。登录完成后：
+要再跑一遍：
 
 ```powershell
 $env:WECHAT_AI_OPENCODE_URL        = (Get-Content .opencode-private\instance.json | ConvertFrom-Json).base
 $env:WECHAT_AI_OPENCODE_USER       = "pyweixin"
 $env:WECHAT_AI_OPENCODE_PASSWORD_FILE = "$PWD\.opencode-private\secret.pw"
 python examples\real_model_check.py --max-calls 5
+```
+
+也可以走交互式登录把凭据写进私有目录（只影响这个私有实例，共享实例 4096
+不受影响）：
+
+```powershell
+python examples/prepare_isolated_opencode.py --auth-login opencode-go
 ```
 
 ### 真实微信
@@ -489,11 +547,12 @@ python examples\real_model_check.py --max-calls 5
 
 | 项 | 状态 |
 | --- | --- |
-| 真实模型（`opencode-go/qwen3.6-plus`）重跑能力验证与逐条验收 | **未验证**，缺 4096 端口的 Basic 密码；旧的"5/5 通过"已作废 |
+| 真实模型（`opencode-go/qwen3.6-plus`）单次调用 | **已验证**：走生产代码路径，模型标识与请求一致，九个字段的结构校验通过 |
+| 真实模型的**能力验证 5/5** 与逐条验收 | **未验证**：本轮只跑了单次真实调用，没有重跑整套 5 项冒烟；旧的"5/5 通过"仍作废 |
 | 多供应商多模型的完整对照 | **未验证**（只验证过 `opencode-go` 一个） |
 | 上游模型下架后的**真实**演练 | **未验证**（逻辑有测试，见 3.1 与第 10 节；没有真的让上游下架） |
 | 真实商户的免费额度数值是否合适 | **未验证**，50 次/天是拍的 |
-| 真实模型的生产准确率 | **未验证**，5 项冒烟只是准入 |
+| 真实模型的生产准确率 | **未验证**，单次调用只是准入 |
 | 真实微信会话 | **未验证**，微信停在扫码页 |
 | 换模型重新分析的**真实**端到端 | **未验证**，入口保持关闭 |
 
