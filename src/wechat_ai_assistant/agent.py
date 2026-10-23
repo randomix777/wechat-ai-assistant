@@ -390,7 +390,7 @@ class LocalAgent:
         if reader is None:
             # 界面链已移除：没有注入读取器就不读。以前这里回退到
             # 直接翻微信窗口读历史，已删除。
-            raise RuntimeError("界面读取已移除：请注入 history_reader（解密库/内存）")
+            raise RuntimeError("界面读取已移除：请注入 history_reader（解密库）")
         with _UI_OPERATION_LOCK:
             return list(
                 reader(

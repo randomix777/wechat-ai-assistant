@@ -1,9 +1,10 @@
-"""首页明细、整理明细、日志、重启微信、充值 —— 这几样随 Tk 界面丢过。
+"""整理明细、日志、重启微信、充值 —— 这几样随 Tk 界面丢过。
 
 ## 一条规矩
 
-**明细按需拉，不进轮询**。``/api/state`` 每秒被拉一次，把几百条澄清/报告塞进去
+**明细按需拉，不进轮询**。``/api/state`` 每秒被拉一次，把报告正文塞进去
 只会让页面越来越卡；所以它们在单独的接口里，页面点了才取。
+（跑完向导不再有"首页"这一页：结果屏看产物，「重新开始」回第一步。）
 """
 from __future__ import annotations
 
@@ -22,61 +23,6 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from wechat_ai_assistant import web_server  # noqa: E402
 from wechat_ai_assistant.application import AppEvents  # noqa: E402
-
-
-def _home_view(**overrides):
-    base = dict(
-        clarifications=[],
-        system_failures=[],
-        stock=[],
-        effective=[],
-        actionable=[],
-        payment_claims=[],
-        quota_headline="分析额度剩余 80%",
-        scope_text="最近 1 天内更新的订单",
-        mode_note="",
-        wechat_ready=True,
-        status_line=lambda: "微信正常",
-        summary_line=lambda: "共 0 单",
-    )
-    base.update(overrides)
-    return SimpleNamespace(**base)
-
-
-class HomeDetailTests(unittest.TestCase):
-    """待澄清 / 系统解析失败：两份不同的东西，不能混成一栏。"""
-
-    def test_clarifications_are_not_orders(self):
-        view = _home_view(clarifications=[
-            {"customer": "张姐", "suggested_question": "您说的这笔钱是付哪一单？",
-             "group_id": "鲜果批发群"},
-        ])
-        data = web_server._home_view(view)
-        self.assertEqual(len(data["clarifications"]), 1)
-        self.assertEqual(data["clarifications"][0]["customer"], "张姐")
-        self.assertEqual(data["counters"]["clarifications"], 1)
-        self.assertEqual(data["counters"]["effective"], 0, "待澄清不算订单")
-
-    def test_system_failures_are_listed_separately(self):
-        view = _home_view(system_failures=[
-            {"reason": "模型返回格式不符", "error": "json decode", "retryable": True},
-        ])
-        data = web_server._home_view(view)
-        self.assertEqual(data["system_failures"][0]["reason"], "模型返回格式不符")
-        self.assertTrue(data["system_failures"][0]["retryable"])
-
-    def test_it_is_capped_so_the_page_stays_fast(self):
-        view = _home_view(clarifications=[
-            {"customer": f"c{i}", "suggested_question": "q", "group_id": "g"}
-            for i in range(120)
-        ])
-        self.assertEqual(len(web_server._home_view(view)["clarifications"]), 50)
-
-    def test_the_shape_is_plain_json(self):
-        data = web_server._home_view(_home_view())
-        json.dumps(data)  # 有 datetime / 自定义对象就会抛
-        self.assertIn("stock", data)
-        self.assertIn("counters", data)
 
 
 class InterfaceTests(unittest.TestCase):
@@ -181,12 +127,17 @@ class PageEntryTests(unittest.TestCase):
         cls.page = (ROOT / "src" / "wechat_ai_assistant" / "web_wizard_page.py").read_text(
             encoding="utf-8")
 
-    def test_home_shows_clarifications_and_failures(self):
-        self.assertIn("待澄清（问客户一句；不算订单）", self.page)
-        self.assertIn("系统解析失败（不是订单，可重试或转人工）", self.page)
+    def test_results_keeps_reference_privacy_and_log_entries(self):
+        # 「重新开始」回第一步后没有首页了：名单上传、隐私说明、日志
+        # 这些入口跟着结果屏走，不能丢。
+        self.assertIn("商品与客户名单", self.page)
+        self.assertIn("数据与隐私说明", self.page)
+        self.assertIn("运行日志", self.page)
 
     def test_results_has_a_report_button(self):
-        self.assertIn('data-action="role-report"', self.page)
+        # 入口现在在底栏的动作表里（不是正文写死的 <button>）：底栏不带滚动，
+        # 报告再长、正文滚多远都点得到。
+        self.assertIn('action:"role-report"', self.page)
         self.assertIn("/api/analysis/report", self.page)
 
     def test_orders_are_clickable_for_the_full_text(self):
@@ -195,6 +146,7 @@ class PageEntryTests(unittest.TestCase):
         self.assertIn("cellText(", self.page)
 
     def test_logs_and_recharge_have_entries(self):
+        # 日志入口是结果屏正文里的小链接按钮（不占商户动作位）。
         self.assertIn('data-action="logs"', self.page)
         self.assertIn("/api/logs", self.page)
         self.assertIn('data-action="recharge"', self.page)

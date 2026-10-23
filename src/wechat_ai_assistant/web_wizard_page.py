@@ -199,6 +199,42 @@ PAGE = r"""<!DOCTYPE html>
                         font-family:inherit; font-size:13px; line-height:1.7;
                         white-space:pre-wrap; word-break:break-word; }
   .analysis-live-text.waiting { color:var(--muted); }
+  /* 分析进行中独占一屏：正文给足高度，一眼就看得出字在往外冒。
+     以前它只是"排在角色卡前面"的一块，窗口一矮就被顶出首屏。 */
+  .analysis-live-full { margin:0; padding:18px 20px; }
+  .analysis-live-full .analysis-live-head { font-size:13px; }
+  .analysis-live-role { margin-left:auto; color:var(--muted); font-size:12px; font-weight:600; }
+  .analysis-live-full .analysis-live-text { max-height:none; height:clamp(200px,46vh,460px); }
+  .analysis-live-progress { display:flex; align-items:center; gap:9px; margin:6px 0 0;
+                            color:#344253; font-size:13px; }
+  /* 分析中：左右两栏（借控制台 console.py 那套 .grid2 分栏）。
+     左边流式正文，右边这次要盯的类别；窄窗口自动叠成一栏。 */
+  .analysis-split { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr);
+                    gap:14px; align-items:start; margin:0 0 10px; }
+  .analysis-side { background:var(--card); border:1px solid var(--line);
+                   border-radius:10px; padding:14px 16px; min-width:0; }
+  .analysis-side h4 { margin:0 0 8px; font-size:13px; }
+  .analysis-wait { margin:0 0 8px; color:var(--muted); font-size:12px;
+                   min-height:18px; }
+  .analysis-reasoning { margin:0 0 8px; padding:6px 10px; border:1px dashed var(--line);
+                         border-radius:8px; background:#fbfaf6; }
+  .analysis-reasoning summary { font-size:12px; color:var(--muted); }
+  .analysis-reasoning pre { margin:6px 0 0; max-height:180px; overflow:auto;
+                             white-space:pre-wrap; word-break:break-word;
+                             font:12px/1.65 inherit; color:#5b6775; }
+  .analysis-sections { display:flex; flex-direction:column; gap:8px; }
+  .analysis-section { border:1px solid var(--line); border-radius:9px;
+                      padding:8px 11px; background:#fff; }
+  .analysis-section.has-content { border-color:#cfe6db; background:#f7fbf9; }
+  .analysis-section h5 { display:flex; align-items:baseline; justify-content:space-between;
+                         gap:8px; margin:0 0 4px; font-size:12px; }
+  .analysis-section h5 .muted { font-size:11px; font-weight:400; }
+  .analysis-section pre { margin:0; white-space:pre-wrap; word-break:break-word;
+                           font:12px/1.65 inherit; color:#344253; max-height:150px;
+                           overflow:auto; }
+  @media (max-width:900px) {
+    .analysis-split { grid-template-columns:minmax(0,1fr); }
+  }
   .result-stat { display:flex; align-items:baseline; gap:8px; margin:14px 0;
                  color:var(--muted); font-size:13px; }
   .result-stat strong { color:var(--ink); font-size:22px; }
@@ -379,13 +415,30 @@ function setHtml(id, html) {
   $(id).innerHTML = html;
 }
 
+// 这一轮分析是什么时候开始的。模型出第一个字之前可能等几十秒，
+// 没有它就报不出"已经等了 N 秒"。
+let ANALYSIS_STARTED_AT = 0;
+
 // 服务正常时不占用顶栏；只有断连时显示状态，成功轮询后自动收起。
+// 短时断连先自己重试（重启服务那几秒就长这样，不值得吓人）；一直连不上
+// 就直说该怎么办 —— 只喊「正在重试」，商户能做的那件事（关掉窗口重开）
+// 就永远没人告诉他，他只会觉得软件死了。
+const CONN_GIVE_UP_MS = 15000;
+let connFailedSince = 0;
 function setConnectionStatus(connected) {
   const status = $("conn");
   status.hidden = !!connected;
-  if (!connected) {
-    status.dataset.kind = "error";
-    status.textContent = "连接中断，正在重试…";
+  if (connected) {
+    connFailedSince = 0;
+    return;
+  }
+  if (!connFailedSince) connFailedSince = Date.now();
+  const giveUp = Date.now() - connFailedSince > CONN_GIVE_UP_MS;
+  status.dataset.kind = "error";
+  status.textContent = giveUp ? "连不上本机服务，请关掉窗口重开" : "连接中断，正在重试…";
+  // 徽标只有几个字，久连不上时在正文顶上再说一遍：数据都在本机，重开不用重读。
+  if (giveUp) {
+    note("连不上本机服务。请关掉这个窗口再打开；本机数据都在，不用重新读取。", "bad");
   }
 }
 
@@ -477,7 +530,6 @@ const PAGES = {
       ? [{label:"下一步", action:"advance",
           primary:data.product_gate_open, disabled: !data.product_gate_open}]
       : [];
-    if (acct.logged_in && data.can_go_home) actions.push({label:"直接去首页", action:"home"});
     return {body: body, actions: actions};
   },
 
@@ -516,9 +568,9 @@ const PAGES = {
             "读取时要在本机解密微信的数据库，比较占机器，读完前请稍等（这期间别关微信）。</p>",
       actions: [{label:"更新消息", action:"choose-read", mode:"update"},
                 {label:"读取全部", action:"choose-read", mode:"all", primary:true}]
-        // 走完过的商户是从首页点「再读一次」过来的，改了主意要能回得去；
-        // 第一次用的人没有首页可言，就不摆这个按钮。
-        .concat(data.can_go_home ? [{label:"回到首页", action:"home"}] : []),
+        // 走完过的商户改主意要能直接回到第一步重来；
+        // 第一次用的人还在第一轮里，用「上一步」就够，不摆这个按钮。
+        .concat(data.can_go_home ? [{label:"重新开始", action:"home"}] : []),
     };
   },
 
@@ -562,15 +614,67 @@ const PAGES = {
     const a = data.analysis;
     const roles = data.roles || [];
     const selectedRole = roles.find((role) => role.id === ROLE) || {};
-    let body = quotaHtml(data.account) + "";
-    // 分析进行中时，把实时正文放在角色选项前面。角色卡片和额度说明会
-    // 把原来位于页面底部的输出区挤出首屏，商户就会误以为模型没有流式输出。
-    if (data.busy && selectedRole.output_kind === "report") {
-      body += '<section class="analysis-live" aria-live="polite" aria-label="AI 实时分析输出">' +
-        '<div class="analysis-live-head"><span class="analysis-live-dot" aria-hidden="true"></span>' +
-        '<span>AI 正在分析 · 实时输出</span></div>' +
-        '<pre id="analysisLiveText" class="analysis-live-text waiting">等待 AI 首段内容…</pre></section>';
+    // 点了「开始 AI 整理」就换一屏：这一屏只讲"正在分析"，选择、额度、说明
+    // 都留在上一态。以前是把流式正文插到角色卡前面靠排序顶到首屏，
+    // 窗口一矮或角色一多，正文又会被挤下去，商户就以为模型没在输出。
+    if (data.busy) {
+      // 只有报告类角色会把正文逐段流出来；订单角色拿的是结构化结果，
+      // 摆一个永远「等待首段内容」的空框就成了假动作。
+      const streams = selectedRole.output_kind === "report";
+      // 左边是模型正在吐的字，右边是这次要盯的类别（标题来自服务端给的
+      // sections，页面不写死类别名）。分栏借的是控制台那套两栏卡片
+      // （console.py 的 .grid2）—— 一屏里同时看"写到哪"和"哪些要管"。
+      //
+      // 报告类角色才有类别可分；订单角色产出的是订单表，没有"报告章节"。
+      const sections = currentSections(data);
+      const left = '<section class="analysis-side">' +
+        '<div class="analysis-live-head"><span class="analysis-live-dot" ' +
+          'aria-hidden="true"></span><span>' +
+          (streams ? "AI 正在分析 · 实时输出" : "AI 正在分析") + "</span>" +
+        (selectedRole.name
+          ? '<span class="analysis-live-role">' + esc(selectedRole.name) + "</span>" : "") +
+        "</div>" +
+        '<p class="analysis-wait" id="analysisProgress"></p>' +
+        // 推理过程：正文之前模型要"想"，实测这段最长 48 秒。它**不是**结论，
+        // 所以要单独一块、折叠起来、标清楚；出正文之后自动收起。
+        '<details class="analysis-reasoning" id="analysisReasoningBox" hidden>' +
+          "<summary>推理过程（模型内部思考，不是分析结论）</summary>" +
+          '<pre id="analysisReasoning"></pre></details>' +
+        (streams
+          ? '<pre id="analysisLiveText" class="analysis-live-text waiting">' +
+            "等待 AI 首段内容…</pre>"
+          : '<p class="analysis-live-progress"><span class="spinner" ' +
+            'aria-hidden="true"></span>正在逐批送模型分析，结果整理好会自动显示。</p>') +
+        "</section>";
+      const right = sections.length
+        ? '<section class="analysis-side"><h4>需要关注的类别</h4>' +
+          '<div class="analysis-sections" id="analysisSections"></div></section>'
+        : "";
+      return {
+        body: '<div class="analysis-split">' + left + right + "</div>" +
+              '<p class="hint">跑完会自动进下一步，这一屏放着不用管。</p>',
+        // 分析跑着的时候不给「上一步」：退到别的屏，后台线程跑完还会
+        // 把人拽回来（以前那一下是硬跳）。
+        actions: [{label:"正在分析，请稍候", disabled:true}],
+      };
     }
+    // 跑完了先停在原地给商户看结论：直播正文就是这次的结果（多批时是各批
+    // 连起来），看完自己点「下一步」看完整报告 —— 以前跑完自动换屏，
+    // 流式输出一闪而过，商户根本没看到"AI 刚才写了什么"。
+    if (data.analysis_ready) {
+      const when = a && (a.reused_from_store || a.restored) ? "上次" : "本次";
+      return {
+        body: '<div class="msg good">分析完成：' + when + '「' +
+              esc((a && a.role_name) || selectedRole.name || "整理") +
+              '」已由 AI 处理 ' + ((a && a.processed) || 0) + ' 条消息。</div>' +
+              '<pre id="analysisLiveText" class="analysis-live-text"></pre>' +
+              '<p class="hint">上面就是这次的分析输出。点「下一步」看整理好的完整报告，' +
+              "或再整理一遍（按用量计费）。</p>",
+        actions: [{label:"下一步，查看完整报告", action:"advance", primary:true},
+                  {label:"再整理一遍", action:"analyze"}],
+      };
+    }
+    let body = quotaHtml(data.account) + "";
     if (roles.length) {
       body += '<section class="role-section" aria-label="整理角色"><div class="role-heading">' +
         '<h3>选择整理角色</h3><p>所有角色都会调用 AI，报告结构随角色变化</p></div>' +
@@ -579,7 +683,6 @@ const PAGES = {
           '<label class="pick-role"><span class="role-top"><span class="role-name">' +
           esc(role.name) + '</span><input type="radio" name="role" value="' +
           esc(role.id) + '"' + (role.id === ROLE ? " checked" : "") +
-          (data.busy ? " disabled" : "") +
           ' aria-label="' + esc(role.name) + '"></span>' +
           (role.description ? '<span class="role-description">' +
             esc(role.description) + "</span>" : "") +
@@ -609,8 +712,7 @@ const PAGES = {
     }
     return {
       body: body,
-      actions: [{label:selectedRole.action_label || "开始 AI 整理", action:"analyze", primary:true,
-                 disabled:!!data.busy},
+      actions: [{label:selectedRole.action_label || "开始 AI 整理", action:"analyze", primary:true},
                 {label:"上一步", action:"back"}],
     };
   },
@@ -634,10 +736,12 @@ const PAGES = {
               (a.partial_error ? '<div class="msg warn">' + esc(a.partial_error) + "</div>" : "") +
               (a.reused_from_store
                 ? '<div class="msg warn">这次没有新消息，显示的是上次生成的报告。</div>' : "") +
-              '<div class="row"><button class="primary" data-action="role-report">查看 AI 整理报告</button>' +
-              '<button data-action="export">导出完整包（含 AI 结果）</button></div>' +
-              '<div id="roleReport"></div>',
-        actions: [{label:"回到首页", action:"home"}],
+              '<div id="roleReport"></div>' + endCards(),
+        // 报告和导出是这一屏的主动作，跟着底栏走 —— 正文往下滚也点得到。
+        // 「重新开始」回第一步：跑完一轮，要么在这屏看产物，要么从头再来。
+        actions: [{label:"查看 AI 整理报告", action:"role-report", primary:true},
+                  {label:"导出完整包（含 AI 结果）", action:"export"},
+                  {label:"重新开始", action:"home"}],
       };
     }
     return {
@@ -648,72 +752,15 @@ const PAGES = {
             '<p>处理 ' + (a.processed || 0) + " 条消息，生成订单 " +
             (a.with_result || 0) + " 单，需要核对 " + (a.needs_review || 0) + " 单" +
             (a.role_name ? "（角色：" + esc(a.role_name) + "）" : "") + "。</p>" +
-            '<div class="row"><button data-action="orders">查看订单</button>' +
-            '<button data-action="export">导出完整包（含 AI 结果）</button></div>' +
-            '<div id="roleReport"></div><div id="orders"></div>',
-      actions: [{label:"回到首页", action:"home"}],
+            '<div id="roleReport"></div><div id="orders"></div>' + endCards(),
+      actions: [{label:"查看订单", action:"orders"},
+                {label:"导出完整包（含 AI 结果）", action:"export"},
+                {label:"重新开始", action:"home"}],
     };
-  },
-
-  done(data) {
-    const home = data.home;
-    if (!home) {
-      return {body: '<p class="muted">正在汇总……</p>', actions: []};
-    }
-    const counters = home.counters || {};
-    const stock = home.stock || [];
-    const acct = data.account || {};
-    let body = "<p>" + esc(home.status_line || "") + "</p>";
-    // 套餐概况与充值入口放在同一块额度面板里，CTA 固定靠右，不挤在说明文字中间。
-    if (acct.logged_in) body += quotaHtml(acct);
-    // 这次整理的结果在首页也留一句：分析详情那一屏是"看结果"的地方，
-    // 但回到首页之后商户还是会想知道刚才那一下干了什么。
-    const last = data.analysis;
-    if (last) {
-      if (last.output_kind === "report") {
-        body += '<p class="hint">' + (last.restored ? "上次「" : "本次「") +
-                esc(last.role_name || "角色整理") +
-                '」已由 AI 分析 ' + (last.processed || 0) + " 条消息，整理报告已生成。</p>";
-      } else {
-        body += '<p class="hint">本次整理：处理 ' + (last.processed || 0) + " 条，生成订单 " +
-                (last.with_result || 0) + " 单，需要核对 " + (last.needs_review || 0) + " 单" +
-                (last.role_name ? "（角色：" + esc(last.role_name) + "）" : "") + "。</p>";
-      }
-    }
-    body += '<div class="row counts">' +
-      [["有效订单", counters.effective], ["需要处理", counters.actionable],
-       ["待澄清", counters.clarifications]]
-        .map(([label, value]) =>
-          '<span class="count"><b>' + (value || 0) + "</b> " + esc(label) + "</span>")
-        .join("") + "</div>";
-    body += clarificationsHtml(home.clarifications) + failuresHtml(home.system_failures);
-    if (stock.length) {
-      body += "<h3>今日备货</h3><table><tr><th>商品</th><th>数量</th><th>单数</th>" +
-              "<th>客户</th></tr>" +
-        stock.map((row) => "<tr><td>" + esc(row.name) + "</td><td>" +
-          row.quantity + esc(row.unit) + "</td><td>" + row.orders + "</td><td>" +
-          esc(row.customers.join("、")) + "</td></tr>").join("") + "</table>";
-    } else {
-      body += '<p class="empty">今天还没有备货明细。</p>';
-    }
-    body += '<p class="hint">' + esc(home.scope_text || "") + "</p>" +
-            '<div class="row"><button data-action="orders">查看订单</button>' +
-            '<button data-action="export">导出完整包（含AI结果）</button>' +
-            // 报告落盘之后，重启也能从首页点回来看 —— 不给入口就等于没存。
-            (last && last.output_kind === "report"
-              ? '<button data-action="role-report">查看 AI 整理报告</button>' : "") +
-            '<button data-action="read-again">再读一次</button>' +
-            '<button data-action="logs">日志</button></div>' +
-            '<div id="logsBox"></div>' +
-            (last && last.output_kind === "report" ? '<div id="roleReport"></div>' : "") +
-            referenceCard() +
-            privacyCard() +
-            '<div id="orders"></div>';
-    return {body: body, actions: []};
   },
 };
 
-// 额度：进度条 + 百分比（和首页同一套说法，来自 data.account）。
+// 额度：进度条 + 百分比（和登录屏同一套说法，来自 data.account）。
 // 没有**真**额度数据时一个字都不写 —— 默认那份 QuotaView 讲的是
 // 「未登录产品账号」，摆在「已登录」旁边就是自相矛盾。
 function quotaHtml(acct) {
@@ -748,6 +795,13 @@ function privacyCard() {
     '<pre style="white-space:pre-wrap;font:inherit;margin:8px 0 0">' + esc(PRIVACY) + "</pre></details>";
 }
 
+// 名单上传、隐私说明、日志：跑完一轮顺手能碰到的地方（结果屏底部）。
+// 不再单设一页"首页" —— 「重新开始」直接回第一步，没有别的落脚点。
+function endCards() {
+  return referenceCard() + privacyCard() +
+    '<p class="hint" style="margin-top:12px"><button class="file" data-action="logs">运行日志</button></p>';
+}
+
 function referenceCard() {
   // 参考信息：商品/客户名单决定"认不认得出来"，没有入口就只能靠命令行导入。
   return '<details class="card" style="margin-top:12px;background:var(--bg)">' +
@@ -762,29 +816,6 @@ function referenceCard() {
       '<label class="file">上传填写好的客户表<input type="file" accept=".xlsx,.csv" ' +
         'data-kind="customers" hidden></label>' +
     "</div><div id=\"referenceResult\"></div></details>";
-}
-
-function clarificationsHtml(rows) {
-  rows = rows || [];
-  if (!rows.length) return "";
-  // 待澄清**不是订单**：不计数、不进备货，只是"该问客户一句"。
-  return '<h3>待澄清（问客户一句；不算订单）</h3><table>' +
-    "<tr><th>客户</th><th>建议这样问</th><th>会话</th></tr>" +
-    rows.map((row) => "<tr><td>" + esc(row.customer) + "</td><td>" +
-      esc(row.question) + "</td><td>" + esc(row.group) + "</td></tr>").join("") +
-    "</table>";
-}
-
-function failuresHtml(rows) {
-  rows = rows || [];
-  if (!rows.length) return "";
-  // 系统解析失败**不是要问客户的问题**，是软件没跑成。
-  return '<h3>系统解析失败（不是订单，可重试或转人工）</h3><table>' +
-    "<tr><th>原因</th><th>说明</th><th>可重试</th></tr>" +
-    rows.map((row) => "<tr><td>" + esc(row.reason) + "</td><td>" +
-      esc(row.detail || "系统没有跑出可用结果") + "</td><td>" +
-      (row.retryable ? "是" : "否") + "</td></tr>").join("") +
-    "</table>";
 }
 
 // 分会话报告：一次选了多个会话时，每段前面本来就有「【会话名】」，
@@ -874,6 +905,62 @@ function reportTextHtml(text) {
   return html.join("");
 }
 
+// ---------------------------------------------------------------- 分析中那一屏
+
+// 这一轮选的是哪个角色、它有哪些类别。类别名来自服务端（roles.result_sections），
+// 页面不写死 —— 换个角色，右边的类别跟着换。
+function currentRole(data) {
+  const roles = (data && data.roles) || [];
+  return roles.find((role) => role.id === ROLE) || {};
+}
+
+function currentSections(data) {
+  const role = currentRole(data);
+  return role.output_kind === "report" ? (role.sections || []) : [];
+}
+
+// 流式正文 → 类别。报告的标题是「### 群内提问」这种（见 roles.result_sections），
+// 按标题切段；还没写到的那一节先空着，等模型写过来。
+function splitByHeadings(text) {
+  const out = {};
+  const lines = String(text || "").split(/\r?\n/);
+  let current = "";
+  for (const raw of lines) {
+    const heading = raw.match(/^\s{0,3}#{1,6}\s*(.+?)\s*$/);
+    if (heading) {
+      current = heading[1].replace(/[【】\[\]]/g, "").trim();
+      if (!(current in out)) out[current] = "";
+      continue;
+    }
+    if (current) out[current] += (out[current] ? "\n" : "") + raw;
+  }
+  return out;
+}
+
+// 标题对不上就退一步按包含关系找 —— 模型偶尔会写成「群内提问（待回复）」。
+function sectionBody(bodies, name) {
+  if (bodies[name]) return bodies[name];
+  for (const key of Object.keys(bodies)) {
+    if (!key) continue;
+    if (key.indexOf(name) >= 0 || name.indexOf(key) >= 0) return bodies[key];
+  }
+  return "";
+}
+
+function analysisSectionsHtml(sections, text) {
+  if (!sections || !sections.length) return "";
+  const bodies = splitByHeadings(text);
+  return sections.map((name) => {
+    const body = String(sectionBody(bodies, name) || "").trim();
+    return '<section class="analysis-section' + (body ? " has-content" : "") + '">' +
+      "<h5><span>" + esc(name) + "</span>" +
+      '<span class="muted">' + (body ? "有内容" : "等模型输出") + "</span></h5>" +
+      (body ? "<pre>" + esc(body) + "</pre>"
+            : '<p class="empty" style="padding:2px 0">还没有内容。</p>') +
+      "</section>";
+  }).join("");
+}
+
 // 表格里的字要能看出被截断（和 merchant_text.cell 一个规矩：40 字 + …）。
 function cellText(text, limit) {
   const value = String(text == null ? "" : text).replace(/\s+/g, " ").trim();
@@ -882,15 +969,10 @@ function cellText(text, limit) {
 }
 
 // 这份会话名单是怎么来的？必须如实说。
-// memory = 没有数据库密钥，只能从内存里扫到群（名字还不全、没有好友）；
-// wcdb   = 解密数据库，真名真人数。商户看到残缺名单时要能知道点刷新重试。
+// wcdb = 解密数据库，真名真人数。商户看到残缺名单时要能知道点刷新重试。
 function sourceStatus(data) {
   const source = data.conversation_source || "";
   const cache = data.conversation_cache_info || "";
-  if (source === "memory") {
-    return "当前列表来自内存扫描（没有数据库密钥）：只有群、名字可能不全，也没有好友。" +
-           "点「刷新列表」会重新提取密钥再读一次。";
-  }
   if (source === "wcdb") {
     return "来源：解密数据库（真名、真人数）。" + (cache ? " " + cache + "。" : "");
   }
@@ -1030,6 +1112,10 @@ function render(data) {
   noteEl.textContent = data.update_note || "";
 
   renderStepper(data);
+  // 分析这一轮什么时候开始的（用来报"已经等了 N 秒"）。分析结束就归零，
+  // 下一轮重新计时。
+  if (data.busy && !ANALYSIS_STARTED_AT) ANALYSIS_STARTED_AT = Date.now();
+  if (!data.busy && ANALYSIS_STARTED_AT) ANALYSIS_STARTED_AT = 0;
   // 登录失败可能属于一次旧的 OAuth 尝试；如果当前账号已有效登录，
   // 不要继续把那次回调超时显示成当前故障。
   const staleLoginError = acct.logged_in && String(data.error || "").startsWith("登录失败：");
@@ -1078,10 +1164,12 @@ function render(data) {
   }
   if (data.step === "conversations" && !CONV_REFRESH_STATUS && !CONV_REFRESHING) {
     CONV_REFRESH_STATUS = sourceStatus(data);
-    CONV_REFRESH_STATUS_KIND = data.conversation_source === "memory" ? "error" : "muted";
+    CONV_REFRESH_STATUS_KIND = "muted";
   }
 
-  const page = PAGES[data.step] || PAGES.done;
+  // 步骤表里没有的（理论上只剩未进向导的空值）退回登录前置页 —— 那是
+  // 每次启动的落点，也是最安全的兜底。
+  const page = PAGES[data.step] || PAGES.login;
   const view = page(data);
   // 屏标题也用服务端给的步骤标题 —— 页面里不写第二份（写了两份一定漂）。
   const row = (data.steps || []).find((item) => item.id === data.step);
@@ -1094,12 +1182,56 @@ function render(data) {
     $("page").innerHTML = html;
   }
   const liveOutput = $("analysisLiveText");
+  const fragment = String(data.summary_stream || "");
+  const reasoning = String(data.reasoning_stream || "");
   if (liveOutput) {
-    const fragment = String(data.summary_stream || "");
     const nearBottom = liveOutput.scrollHeight - liveOutput.scrollTop - liveOutput.clientHeight < 36;
     liveOutput.textContent = fragment || "等待 AI 首段内容…";
     liveOutput.classList.toggle("waiting", !fragment);
     if (nearBottom) liveOutput.scrollTop = liveOutput.scrollHeight;
+  }
+  // 推理过程：正文还没出来时它是唯一在动的东西，所以默认展开、跟着滚；
+  // 正文一开始就自动收起（想看再点开）—— 思考过程不是报告，别占着屏幕。
+  const reasoningBox = $("analysisReasoningBox");
+  const reasoningText = $("analysisReasoning");
+  if (reasoningText) {
+    reasoningText.textContent = reasoning;
+    if (reasoningBox) {
+      reasoningBox.hidden = !reasoning;
+      if (reasoning) {
+        const pre = reasoningText;
+        const nearBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 36;
+        if (nearBottom) pre.scrollTop = pre.scrollHeight;
+        if (!fragment && !reasoningBox.dataset.auto) reasoningBox.open = true;
+        if (fragment && reasoningBox.open && !reasoningBox.dataset.auto) {
+          reasoningBox.dataset.auto = "1";
+          reasoningBox.open = false;
+        }
+      }
+    }
+  }
+  // 分析进度：模型出第一个字之前可能等几十秒（实测最长 48 秒），
+  // 这一段时间不给一句"正在分析第几个会话"，商户只会以为卡死了。
+  const progress = $("analysisProgress");
+  if (progress) {
+    const line = String(data.analysis_progress || "");
+    if (line) {
+      progress.textContent = line;
+    } else if (fragment) {
+      progress.textContent = "正在写报告…";
+    } else if (reasoning) {
+      progress.textContent = "模型正在思考（已写出 " + reasoning.length + " 字）…";
+    } else {
+      const seconds = ANALYSIS_STARTED_AT
+        ? Math.max(0, Math.round((Date.now() - ANALYSIS_STARTED_AT) / 1000)) : 0;
+      progress.textContent = "模型还在读这一批（已等 " + seconds + " 秒）…";
+    }
+  }
+  // 右栏的类别：跟着流式正文一起长出来。
+  const sectionsBox = $("analysisSections");
+  if (sectionsBox) {
+    const sectionsHtml = analysisSectionsHtml(currentSections(data), fragment);
+    if (sectionsBox.innerHTML !== sectionsHtml) sectionsBox.innerHTML = sectionsHtml;
   }
 
   // 会话表：指纹没变就一个字节都不动 —— 1 秒一次的轮询不能把勾选冲掉。
@@ -1122,8 +1254,18 @@ function render(data) {
   updateConversationRefreshUi();
 }
 
+// 底栏按钮点开的正文（报告 / 日志 / 订单）可能根本不在视野里：渲染完滚过去，
+// 否则商户看到的就是"点了没反应"。focus 只为把读屏的位置也带过去。
+function revealBox(box) {
+  if (!box) return;
+  box.setAttribute("tabindex", "-1");
+  box.scrollIntoView({block:"start", behavior:"smooth"});
+  box.focus({preventScroll:true});
+}
+
 function actionHtml(item) {
-  return '<button data-action="' + esc(item.action) + '"' +
+  // 有些底栏位只是一句状态（比如「正在分析，请稍候」），没有动作可点。
+  return '<button' + (item.action ? ' data-action="' + esc(item.action) + '"' : "") +
     (item.mode ? ' data-mode="' + esc(item.mode) + '"' : "") +
     (item.primary ? ' class="primary"' : "") +
     (item.disabled ? " disabled" : "") + ">" + esc(item.label) + "</button>";
@@ -1284,7 +1426,10 @@ document.addEventListener("click", async (event) => {
     const wanted = (LAST && LAST.analysis && LAST.analysis.role_id) || ROLE;
     const payload = await get("/api/analysis/report?role=" + encodeURIComponent(wanted));
     const box = $("roleReport");
-    if (box) box.innerHTML = roleReportHtml(payload);
+    if (box) {
+      box.innerHTML = roleReportHtml(payload);
+      revealBox(box);
+    }
     return;
   }
   if (action === "logs") {
@@ -1295,6 +1440,7 @@ document.addEventListener("click", async (event) => {
                "</code>　出问题时把这个文件发给客服。</p>";
     html += '<pre class="logs">' + esc(((data && data.lines) || []).join("\n")) + "</pre>";
     box.innerHTML = html;
+    revealBox(box);
     return;
   }
   if (action === "recharge") {
@@ -1317,13 +1463,6 @@ document.addEventListener("click", async (event) => {
     window.location.href = "/api/export/bundle";
     return;
   }
-  if (action === "read-again") {
-    // 首页的"再读一次"：回「确认读取范围」重选（不绕过范围确认）。
-    // 以前这里调的是 /api/wizard/back —— 首页不在步骤里，只会弹
-    // 「这一步没有上一步。」，按钮等于坏的。
-    await post("/api/wizard/reread");
-    return;
-  }
   if (action === "orders") {
     const data = await get("/api/orders");
     if (!data) return;
@@ -1343,7 +1482,10 @@ document.addEventListener("click", async (event) => {
         "</table><div id=\"orderDetail\"></div>"
       : '<p class="empty">还没有订单。</p>';
     const box = $("orders");
-    if (box) box.innerHTML = html;
+    if (box) {
+      box.innerHTML = html;
+      revealBox(box);
+    }
     return;
   }
   if (action === "home") {
@@ -1408,7 +1550,7 @@ function referenceResultHtml(out) {
 
 async function tick() {
   const data = await get("/api/state");
-  if (!data) return;
+  if (!data) return null;
   try {
     render(data);
   } catch (err) {
@@ -1419,10 +1561,16 @@ async function tick() {
     $("page").innerHTML = '<div class="msg bad">这一屏没能画出来：' +
       esc(err && err.message ? err.message : err) + "</div>";
   }
+  return data;
 }
 
-tick();
-setInterval(tick, 1000);
+// 轮询间隔自适应：读取/分析在跑（busy）时加密到 200ms —— 流式正文要跟手，
+// 1 秒一跳在屏幕上就是"一段一段蹦"；闲时 1 秒一次就够，别白烧机器。
+async function pollLoop() {
+  const data = await tick();
+  setTimeout(pollLoop, data && data.busy ? 200 : 1000);
+}
+pollLoop();
 </script>
 </body>
 </html>

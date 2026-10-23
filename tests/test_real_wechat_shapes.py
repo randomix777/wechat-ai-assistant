@@ -26,8 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from wechat_ai_assistant.history_read import HistoryReader, TimeWindow  # noqa: E402
 from wechat_ai_assistant.orders import OrderStore  # noqa: E402
-from wechat_ai_assistant.utils import (  # noqa: E402
-    UNRESOLVED_SENDER, UNRESOLVED_TIMESTAMP, parse_group_chat_history)
+from wechat_ai_assistant.utils import UNRESOLVED_SENDER, UNRESOLVED_TIMESTAMP  # noqa: E402
 from wechat_ai_assistant.wechat_time import local_timezone, parse_timestamp, sent_epoch  # noqa: E402
 
 #: 真机上 ``dump_chat_history`` 原样返回的时间戳。日的位数不固定。
@@ -145,40 +144,6 @@ class GroupSenderTests(unittest.TestCase):
     VIEW = "mmui::ChatTextItemView"
 
     UNKNOWN = UNRESOLVED_SENDER
-
-    def test_sender_is_never_none_even_when_wechat_exposes_no_nickname(self):
-        details_with_name = [(self.REAL_ITEM, self.VIEW)]
-        details_without_name = [(self.REAL_ITEM, self.VIEW)]
-        _, senders, _, _ = parse_group_chat_history(details_with_name, details_without_name, [])
-        self.assertEqual(len(senders), 1)
-        self.assertIsNotNone(senders[0], "发送人是 None：这条消息无法归属任何客户")
-        self.assertTrue(all(senders), "任何一条都不许是 None")
-
-    def test_every_branch_uses_the_same_fallback(self):
-        """四个分支必须同一套兜底，否则又会分叉出 None。"""
-        for group_members in ([], ["张老板"]):
-            for item in (self.REAL_ITEM, self.NAMED_ITEM):
-                for without in ([], [(item, self.VIEW)]):
-                    with self.subTest(members=group_members, named=item == self.NAMED_ITEM,
-                                      aligned=bool(without)):
-                        _, senders, _, _ = parse_group_chat_history(
-                            [(item, self.VIEW)], without, group_members
-                        )
-                        self.assertTrue(senders, "解析不出任何消息")
-                        self.assertTrue(all(senders), f"发送人出现 None：{senders}")
-
-    def test_a_known_nickname_is_still_extracted(self):
-        """兜底不能把能认出来的昵称也吃掉。"""
-        _, senders, _, _ = parse_group_chat_history(
-            [(self.NAMED_ITEM, self.VIEW)], [], ["张老板"]
-        )
-        self.assertEqual(senders, ["张老板"])
-
-    def test_the_fallback_is_used_when_the_nickname_is_unknown(self):
-        _, senders, _, _ = parse_group_chat_history(
-            [(self.NAMED_ITEM, self.VIEW)], [], ["不在群里的人"]
-        )
-        self.assertEqual(senders, [self.UNKNOWN])
 
 
 class IngestKeepsRealTimestampsTests(unittest.TestCase):

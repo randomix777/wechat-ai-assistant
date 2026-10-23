@@ -432,7 +432,7 @@ class MerchantClient:
         authenticated: bool = True,
         extra_headers: Mapping[str, str] | None = None,
         on_chunk: Callable[[str], None] | None = None,
-        on_reasoning: Callable[[int], None] | None = None,
+        on_reasoning: Callable[[str], None] | None = None,
         on_diagnostics: Callable[[Mapping[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         """Read OpenAI-compatible SSE and return the same shape as a normal completion."""
@@ -513,7 +513,9 @@ class MerchantClient:
                             if isinstance(reasoning, str) and reasoning:
                                 reasoning_chars += len(reasoning)
                                 if on_reasoning:
-                                    on_reasoning(len(reasoning))
+                                    # 交**正文**，不是长度：界面要把推理过程显示出来
+                                    # （模型常常先想几十秒，这段时间只有这段字可看）。
+                                    on_reasoning(reasoning)
                     content = delta.get("content", "") if isinstance(delta, Mapping) else ""
                     # 部分网关在流式模式下仍用 message.content 而非 delta.content，
                     # 两者都兼容，避免流式回调彻底丢失。

@@ -123,15 +123,19 @@ class PageAndStateTests(unittest.TestCase):
         self.assertEqual(status, 200)
         # 品牌名跟着桌面端叫「微信AI智能助理」（以前叫接单助手，改名时测试没跟上）。
         self.assertIn("微信AI智能助理", html)
-        for term in ("读取历史", "智能整理", "整理成一段话", "商品与客户名单", "订单", "运行日志"):
+        for term in ("读取历史", "智能整理", "商品与客户名单", "订单", "运行日志"):
             self.assertIn(term, html, f"\u9875\u9762\u91cc\u6ca1\u6709\u300c{term}\u300d")
+        # 老路「整理成一段话」收了：商户只有「选角色 → 开始分析」这一条路，
+        # 页面上再摆一个入口，就是给第二条说法留门。
+        self.assertNotIn("整理成一段话", html)
 
     def test_state_has_everything_the_page_needs(self):
         status, body = self.client.get("/api/state")
         data = json.loads(body.decode("utf-8"))
         self.assertEqual(status, 200)
         for key in ("step", "steps", "busy", "error", "logs", "conversations", "orders",
-                    "summary", "analysis", "history", "progress", "can_summarize"):
+                    "summary_stream", "reasoning_stream", "analysis_progress", "analysis",
+                    "history", "progress"):
             self.assertIn(key, data, f"\u9875\u9762\u8981\u7528 {key}\uff0c\u4f46\u72b6\u6001\u91cc\u6ca1\u6709")
 
     def test_the_steps_come_from_the_wizard_not_from_the_page(self):
@@ -174,17 +178,6 @@ class PageAndStateTests(unittest.TestCase):
         # 额度页与智能整理同屏：标记在智能整理那一步上。
         self.assertEqual(_steps_view(WizardStep.QUOTA), _steps_view(WizardStep.ANALYZE))
 
-    def test_the_home_screen_counts_as_every_step_done(self):
-        """首页不在要走的步骤里：到了首页整条都算走完。
-
-        以前把 ``done`` 映射成最后一步，首页上最后一颗圆点永远亮着「当前」，
-        看起来像「AI分析还在跑」。
-        """
-        from wechat_ai_assistant.web_server import _steps_view
-        from wechat_ai_assistant.wizard import WizardStep
-
-        self.assertEqual({row["state"] for row in _steps_view(WizardStep.DONE)}, {"done"})
-
     def test_an_unknown_address_says_so_in_chinese(self):
         code, data = self.client.post_expect_error("/api/nope")
         self.assertEqual(code, 404)
@@ -215,15 +208,16 @@ class PageAndStateTests(unittest.TestCase):
         self.assertNotIn("__VERSION__", html, "版本号的占位符没被替换")
 
     def test_the_page_says_where_the_conversation_list_came_from(self):
-        """会话名单来自解密库还是内存扫描，必须写在界面上。
+        """会话名单的来源必须写在界面上。
 
-        内存扫描只有群、名字不全、没有好友。不写出来，商户看到残缺名单
-        只会以为软件坏了。
+        现在只有解密库一条路；没列出来（没钥匙）也要照实说，
+        否则商户看到空名单只会以为软件坏了。
         """
         page = (ROOT / "src" / "wechat_ai_assistant" / "web_wizard_page.py").read_text(
             encoding="utf-8")
         self.assertIn("conversation_source", page)
-        self.assertIn("内存扫描", page)
+        self.assertIn("解密数据库", page)
+        self.assertNotIn("内存扫描", page, "内存 carve 兜底已删除，界面不应再提")
         self.assertIn("/api/conversations?force=1", page,
                       "点刷新要强制重提密钥，不能被 5 分钟节流拦住")
 
@@ -528,14 +522,19 @@ class ConversationChoiceTests(unittest.TestCase):
 
 
 class GateSharesOneTruthTests(unittest.TestCase):
-    """\u201c\u80fd\u4e0d\u80fd\u6574\u7406\u201d\u5fc5\u987b\u7528\u5171\u7528\u903b\u8f91\uff0c\u4e0d\u5f97\u81ea\u5df1\u5224\u3002"""
+    """“能不能整理”只有一份判据，界面不许自己再判一遍。
+
+    老路（「整理成一段话」）撤了之后，接口里不再有那个开关；但判据本身还在
+    ``summary_task.has_messages_for``，而且它看的是**库里**的情况，不是本次
+    读到几条 —— 更新时读到 0 条，不代表群里没有消息。
+    """
 
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         from wechat_ai_assistant.orders import OrderStore
 
         self.store = OrderStore(str(pathlib.Path(self.dir.name) / "o.db"))
-        self.tenant = self.store.create_merchant("\u6d4b\u8bd5\u5546\u5bb6")["merchant_id"]
+        self.tenant = self.store.create_merchant("测试商家")["merchant_id"]
         self.app = _FakeApp()
         self.app.orders = self.store
         self.app.tenant = self.tenant
@@ -551,26 +550,21 @@ class GateSharesOneTruthTests(unittest.TestCase):
     def _state(self):
         return json.loads(self.client.get("/api/state")[1].decode("utf-8"))
 
-    def test_it_is_false_before_anything_is_read(self):
-        self.assertFalse(self._state()["can_summarize"])
+    def test_the_state_no_longer_carries_the_old_switch(self):
+        """老路的开关没了 —— 免得两处说法各留一半。"""
+        self.assertNotIn("can_summarize", self._state())
 
-    def test_it_becomes_true_once_the_store_has_messages(self):
-        """\u6309\u5e93\u91cc\u7684\u60c5\u51b5\u5224\u65ad\uff0c\u4e0d\u662f\u6309\u672c\u6b21\u8bfb\u5230\u51e0\u6761\u3002"""
-        self.store.add_import(self.tenant, "\u9c9c\u679c\u7fa4", [
-            {"sender": "\u5f20\u59d0", "content": "\u8981\u4e24\u7bb1\u82f9\u679c",
-             "sent_at": "2026-10-14T09:00:00-04:00", "source_id": "s-0"}], "probe", "demo")
-        server_state = self.server.web_state
-        server_state.set(history=_result_with_zero_total())
-        self.assertTrue(self._state()["can_summarize"],
-                        "\u5e93\u91cc\u660e\u660e\u6709\u6d88\u606f\uff0c\u5374\u8bf4\u4e0d\u80fd\u6574\u7406")
-
-    def test_the_page_uses_the_same_answer_as_the_logic(self):
+    def test_the_shared_predicate_looks_at_the_store_not_at_this_read(self):
+        """按**库里**的情况判断，不按本次读到几条。"""
         result = _result_with_zero_total()
         holder = types.SimpleNamespace(orders=self.store, tenant=self.tenant)
         self.server.web_state.set(history=result)
-        self.assertEqual(self._state()["can_summarize"],
-                         summary_task.has_messages_for(holder, result),
-                         "\u9875\u9762\u548c\u5171\u7528\u903b\u8f91\u7ed9\u4e86\u4e0d\u540c\u7b54\u6848")
+        self.assertFalse(summary_task.has_messages_for(holder, result))
+        self.store.add_import(self.tenant, "鲜果群", [
+            {"sender": "张嫂", "content": "要两箱苹果",
+             "sent_at": "2026-10-14T09:00:00-04:00", "source_id": "s-0"}], "probe", "demo")
+        self.assertTrue(summary_task.has_messages_for(holder, result),
+                        "库里明明有消息，却说不能整理")
 
 
 def _result_with_zero_total():
@@ -620,19 +614,53 @@ class BlockingWorkTests(unittest.TestCase):
 
     def test_a_second_job_is_refused_while_one_runs(self):
         state = self.server.web_state
-        state.start("\u6b63\u5728\u505a\u5176\u4ed6\u4e8b")
-        code, data = self.client.post_expect_error("/api/summary")
+        state.start("正在做其他事")
+        code, data = self.client.post_expect_error("/api/analyze")
         self.assertEqual(code, 409)
-        self.assertIn("\u6b63\u5728\u505a\u5176\u4ed6\u4e8b", data["error"])
+        self.assertIn("正在做其他事", data["error"])
 
-    def test_summary_cancel_sets_the_flag(self):
-        """取消接口只置位：后台线程在批次间隙自己停，不占处理线程。"""
-        state = self.server.web_state
-        self.assertFalse(state.summary_cancel.is_set())
-        status, data = self.client.post("/api/summary/cancel")
+    def test_the_old_summary_path_is_gone(self):
+        """老路（「整理成一段话」）的接口没了 —— 商户只有「选角色 → 开始分析」一条路。
+
+        留着接口就等于留着第二条说法：页面上哪天手一抖又摆回这个按钮，
+        商户点到的就是另一套行为。
+        """
+        for path in ("/api/summary", "/api/summary/cancel"):
+            code, _ = self.client.post_expect_error(path)
+            self.assertEqual(code, 404, path + " 还在，老路没收干净")
+
+
+class RootPathTests(unittest.TestCase):
+    """产品里敲根路径，拿到的是商户版向导页。
+
+    调试页只在开发外壳（``web_dev``）下存在。产品端口上摆着调试页，商户在
+    浏览器里敲一下地址就会看到开发按钮 —— 那是给开发看的，不是给商户看的。
+    """
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.app = _FakeApp()
+        self.server = _serve(self.app)
+        self.client = _Client(self.server)
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.dir.cleanup()
+
+    def test_the_root_path_is_the_wizard_page_in_the_product(self):
+        from wechat_ai_assistant import web_server
+
+        original = web_server.DEV_RELOAD
+        try:
+            web_server.DEV_RELOAD = False
+            status, body = self.client.get("/")
+        finally:
+            web_server.DEV_RELOAD = original
+        html = body.decode("utf-8")
         self.assertEqual(status, 200)
-        self.assertTrue(data["ok"])
-        self.assertTrue(state.summary_cancel.is_set())
+        self.assertIn("办理流程", html, "根路径给的是向导页（步骤条在）")
+        self.assertNotIn("整理成一段话", html, "老路不在产品端口上")
 
 
 class MerchantWizardPageTests(unittest.TestCase):

@@ -96,6 +96,17 @@ class AppEvents:
     on_logged_in: Callable[[], None] | None = None
     #: AI 报告的增量文本。Web 界面据此在生成过程中更新实时预览。
     on_analysis_stream: Callable[[str], None] | None = None
+    #: 模型的**推理过程**增量（和报告正文分开）。
+    #:
+    #: 正文之前模型要"想"，实测这段最长 48 秒。以前这段时间界面只有一句
+    #: 「正在推理」，商户看不出任何东西在动 —— 推理正文流出来，才叫"看得见在分析"。
+    #: 它**不是**分析结论：界面必须标清楚，别让商户把思考过程当报告。
+    on_analysis_reasoning: Callable[[str], None] | None = None
+    #: AI 分析的**进度**（正在分析第几个会话、这个会话叫什么）。
+    #: 模型出第一个字之前可能等几十秒（实测最长 48 秒），这段时间界面要是
+    #: 只有一个空框，商户只会以为卡死了 —— 有一句"正在分析第 2/3 个会话"
+    #: 才知道软件在动。
+    on_analysis_progress: Callable[[str], None] | None = None
     #: 一句**不打断人**的告知（显示在顶部横幅，可以随时被下一条覆盖）。
     #: 用来讲清"软件此刻在动什么"，比如首次读取要扫描微信数据库并提取密钥。
     #: 传空串表示撤掉。
@@ -130,7 +141,7 @@ class MerchantApplication:
         self.simulated = simulated
         self.gateway_url = gateway_url
 
-        # 所有后台任务共用一条串行队列：解密拷贝、内存读取互不打断。
+        # 所有后台任务共用一条串行队列：解密拷贝互不打断。
         # （以前这里是键鼠串行队列；界面链移除后只剩数据任务。）
         self.ui_queue = UiOperationQueue(thread_name="merchant-ui")
         self.ui_lock = self.ui_queue
@@ -160,13 +171,13 @@ class MerchantApplication:
         #: wxid 显示名备注（内存解不出的群名/人名，手备注一次一直有效）。
         self.wxid_aliases: dict = self.load_aliases()
         self.conversation_source = conversation_source or RealConversationSource(ui_lock=self.ui_lock)
-        # 解密库优先：有钥匙就走真名真人数，没有就当没这条路（内存兜底）。
+        # 解密库：有钥匙就走真名真人数，没钥匙就列不出会话（界面照实说）。
         self._hook_wcdb(self.conversation_source)
-        #: 上一次列举走的是哪条路（`wcdb` / `memory`）。界面如实显示。
+        #: 上一次列举走的是哪条路（`wcdb` / 空串=没列出来）。界面如实显示。
         self.conversation_source_label = ""
         #: 没钥匙时点"读取"自动提一次。每个进程只试一次，重试走界面按钮。
         self._wcdb_ensure_attempted = False
-        #: 界面链已移除：没有持续监听，只有定时轮询读解密库/内存。
+        #: 界面链已移除：没有持续监听，只有定时轮询读解密库。
         #: 实时性要求高的商户把轮询间隔调小，或点「读取」手动补读。
 
         # 注入了读取器 = 消息由调用方供给（测试替身、外部集成），那就是 members
@@ -759,7 +770,7 @@ class MerchantApplication:
     def list_wcdb_conversations(self, kind: str = "") -> list[Any] | None:
         """解密库会话（注入给 RealConversationSource 的优先路）。
 
-        返回 None 或抛异常都等于"这条路不通"，上游回落内存路。
+        返回 None 或抛异常都等于"这条路不通"，上游按解密库不可用处理。
         """
         from .wcdb import WcdbReader, WcdbUnavailable
 
@@ -957,7 +968,7 @@ class MerchantApplication:
             if ids:
                 marks = ",".join("?" for _ in ids)
                 rows = self.orders.db.execute(
-                    "SELECT id, group_id, sender, content, sent_at, kind FROM messages "
+                    "SELECT id, group_id, sender, content, sent_at, kind, observed_at FROM messages "
                     f"WHERE merchant_id=? AND id IN ({marks})",
                     [self.tenant, *ids]).fetchall()
                 messages_override = [{
@@ -967,6 +978,7 @@ class MerchantApplication:
                     "sender": str(row["sender"] or ""),
                     "content": str(row["content"] or ""),
                     "sent_at": str(row["sent_at"] or ""),
+                    "observed_at": str(row["observed_at"] or ""),
                     "kind": str(row["kind"] or "text"),
                 } for row in rows]
                 try:
@@ -977,9 +989,22 @@ class MerchantApplication:
         return summary_task.run_summary(
             self, self.wizard.history_result, role_id=role_id,
             messages_override=messages_override,
-            on_progress=self.events.on_log,
+            on_progress=self._analysis_progress,
             on_stream=getattr(self.events, "on_analysis_stream", None),
+            on_reasoning=getattr(self.events, "on_analysis_reasoning", None),
         )
+
+    def _analysis_progress(self, line: str) -> None:
+        """分析的进度：日志里留一份，同时给界面一句短的。
+
+        两边都要：日志是给排查用的（"卡住了"时要看它）；界面那句是给商户看的
+        （"正在分析第 2/3 个会话"比一个空框有用得多）。
+        """
+        text = str(line or "")
+        if self.events.on_log:
+            self.events.on_log(text)
+        if self.events.on_analysis_progress:
+            self.events.on_analysis_progress(text)
 
     # ------------------------------------------------------------- 模型
 

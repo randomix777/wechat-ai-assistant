@@ -127,7 +127,7 @@ class RolePromptContractTests(unittest.TestCase):
     PROMPT_FINGERPRINTS = {
         "order": ("order-v2", "881bec71f1485372"),
         "activity": ("activity-v2", "6e2c9dce07adda51"),
-        "generic": ("generic-v2", "157099faf38f634c"),
+        "generic": ("generic-v3", "a576c8e95521cad8"),
     }
 
     def test_every_role_prompt_carries_the_same_guardrails(self):
@@ -158,11 +158,11 @@ class RolePromptContractTests(unittest.TestCase):
                     "再更新这条指纹（缓存按版本失效）")
 
     def test_only_report_roles_carry_report_sections(self):
-        """分节标题只属于**报告**角色：订单助手的产出是订单表，不该列章节。"""
+        """分节标题只属于**分节**报告角色：订单助手产出订单表、通用整理是
+        叙述式（没有固定栏目，空的「暂无」小节是脚手架噪音），都不该列章节。"""
         self.assertEqual(get_role(ROLE_ORDER).result_sections, ())
-        for role_id in (ROLE_ACTIVITY, ROLE_GENERIC):
-            with self.subTest(role=role_id):
-                self.assertTrue(get_role(role_id).result_sections)
+        self.assertEqual(get_role(ROLE_GENERIC).result_sections, ())
+        self.assertTrue(get_role(ROLE_ACTIVITY).result_sections)
 
 
 class WizardRoleDispatchTests(unittest.TestCase):
@@ -238,8 +238,11 @@ class WizardRoleDispatchTests(unittest.TestCase):
             self.assertEqual(calls, [(ROLE_ACTIVITY, None)], "要真把角色交给 AI 服务")
             self.assertIn("报名接龙", summary["role_report"]["summary"])
             self.assertFalse(organize.called, "本机规则引擎不该再跑一遍")
-            self.assertEqual(wizard.step, WizardStep.RESULTS,
-                             "整理完停在分析详情，那一屏才看得到报告")
+            self.assertEqual(wizard.step, WizardStep.ANALYZE,
+                             "跑完先停在整理屏看结论，点「下一步」才进分析详情")
+            self.assertTrue(wizard._analysis_ready)
+            self.assertTrue(wizard.advance()["ok"])
+            self.assertEqual(wizard.step, WizardStep.RESULTS)
         finally:
             store.close()
             tmp.cleanup()
@@ -338,7 +341,9 @@ class WizardRoleDispatchTests(unittest.TestCase):
             self.assertTrue(summary["reused_from_store"])
             self.assertEqual(summary["processed"], 7)
             self.assertIn("张姐 +1", summary["role_report"]["summary"])
-            self.assertEqual(wizard.step, WizardStep.RESULTS)
+            # 跑完停在整理屏给商户看结论，点「下一步」才进分析详情。
+            self.assertEqual(wizard.step, WizardStep.ANALYZE)
+            self.assertTrue(wizard._analysis_ready)
         finally:
             store.close()
             tmp.cleanup()

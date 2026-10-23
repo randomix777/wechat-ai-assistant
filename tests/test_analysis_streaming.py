@@ -47,7 +47,7 @@ class Response(io.BytesIO):
 
 
 class Opener:
-    def __init__(self, *responses: bytes):
+    def __init__(self, *responses):
         self.responses = list(responses)
         self.requests = []
 
@@ -55,13 +55,91 @@ class Opener:
         self.requests.append(request)
         if not self.responses:
             raise AssertionError("Unexpected extra paid request")
-        return Response(self.responses.pop(0))
+        item = self.responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return Response(item)
 
     def bodies(self):
         return [json.loads(request.data) for request in self.requests]
 
 
+def rejecting(code: str = "unsupported_model_parameter", status: int = 400,
+              message: str = "unsupported parameter: thinking"):
+    """网关对"这个模型不吃这个参数"回的 400。"""
+    body = json.dumps({"error": {"code": code, "message": message}}).encode()
+    import urllib.error
+
+    return urllib.error.HTTPError("https://example.invalid", status, "err", {},
+                                 io.BytesIO(body))
+
+
 class AnalysisStreamingTests(unittest.TestCase):
+    def setUp(self):
+        # 模块级"这个模型不吃 thinking"要清掉，否则用例之间互相影响。
+        from wechat_ai_assistant import summary_task
+
+        summary_task._THINKING_UNSUPPORTED.clear()
+
+    def tearDown(self):
+        from wechat_ai_assistant import summary_task
+
+        summary_task._THINKING_UNSUPPORTED.clear()
+
+    def test_a_model_that_rejects_thinking_is_retried_without_it(self):
+        """模型不接受 thinking 参数时：退一步重试，并且记住别再发。
+
+        反转记录：给 ``jyi-default`` 打开推理开关后，网关回 400
+        ``unsupported_model_parameter``，整个分析失败，商户看到的是
+        「所选分析模型暂不可用」—— 明明只是"这个模型不吃这个参数"。
+        400 不产生费用，所以这次重试不额外花钱。
+        """
+        opener = Opener(rejecting(), completion("分析正文"))
+        with patch("wechat_ai_assistant.client_login.build_opener", return_value=opener):
+            report = _complete_summary_prompt(
+                JYIClient(), "jyi-default", [{"role": "user", "content": "苹果两箱"}],
+                on_reasoning=lambda _text: None)
+        self.assertEqual(report, "分析正文")
+        self.assertEqual(opener.bodies()[0]["thinking"], {"type": "enabled"})
+        self.assertNotIn("thinking", opener.bodies()[1], "降级后不许再发这个参数")
+
+    def test_a_rejected_model_is_remembered_for_the_next_call(self):
+        """记住之后，下一批连试都不试 —— 否则每批都白花一次 400 往返。"""
+        from wechat_ai_assistant import summary_task
+
+        opener = Opener(rejecting(), completion("第一批"), completion("第二批"))
+        with patch("wechat_ai_assistant.client_login.build_opener", return_value=opener):
+            _complete_summary_prompt(
+                JYIClient(), "jyi-default", [{"role": "user", "content": "苹果两箱"}],
+                on_reasoning=lambda _text: None)
+            second = _complete_summary_prompt(
+                JYIClient(), "jyi-default", [{"role": "user", "content": "梨一箱"}],
+                on_reasoning=lambda _text: None)
+        self.assertEqual(second, "第二批")
+        self.assertIn("jyi-default", summary_task._THINKING_UNSUPPORTED)
+        self.assertNotIn("thinking", opener.bodies()[2],
+                         "记住之后连试都不试，直接不带这个参数")
+
+    def test_reasoning_text_reaches_the_interface_separately(self):
+        """推理过程要给界面看，但**不能**混进报告正文。
+
+        模型常常先想几十秒（实测最长 48 秒），这段时间界面上能显示的只有推理。
+        以前只把推理的**字数**交出去，页面就只能写一句「正在推理」—— 商户看不到
+        任何在动的东西。所以这里钉两件事：推理正文确实到了 `on_reasoning`，
+        而且正文流里一个字都没有它。
+        """
+        opener = Opener(completion("分析正文", reasoning="先看这两句是不是订货"))
+        reasoning, chunks = [], []
+        with patch("wechat_ai_assistant.client_login.build_opener", return_value=opener):
+            report = _complete_summary_prompt(
+                JYIClient(), "jyi-default", [{"role": "user", "content": "苹果两箱"}],
+                on_stream=chunks.append, on_reasoning=reasoning.append)
+        self.assertEqual(report, "分析正文")
+        self.assertEqual("".join(reasoning), "先看这两句是不是订货")
+        self.assertEqual("".join(chunks), "分析正文", "推理不许混进正文")
+        # 有人在看推理才打开它：没人看仍然直答，别为看不见的 token 付钱。
+        self.assertEqual(opener.bodies()[0]["thinking"], {"type": "enabled"})
+
     def test_final_content_is_streamed_without_exposing_reasoning(self):
         opener = Opener(completion("订单分析正文", reasoning="内部推理"))
         chunks = []

@@ -154,21 +154,7 @@ class NoChatContentTests(unittest.TestCase):
 class SourceTests(unittest.TestCase):
     """三层都要有记录，否则某一层出问题就断链。"""
 
-    def test_the_three_layers_all_log(self):
-        for name in ("history_read.py", "utils.py", "WeChatAuto.py"):
-            source = (ROOT / "src" / "wechat_ai_assistant" / name).read_text(encoding="utf-8")
-            with self.subTest(module=name):
-                self.assertIn("LOGGER = logging.getLogger(__name__)"
-                              if name == "history_read.py"
-                              else "LOGGER=logging.getLogger(__name__)", source,
-                              f"{name} 没有 logger")
-
-    def test_the_traverse_layer_records_why_it_came_back_empty(self):
-        """这正是查「读到 0 条」最需要的那条信息。"""
-        source = (ROOT / "src" / "wechat_ai_assistant" / "utils.py").read_text(encoding="utf-8")
-        self.assertIn("列表本身是空的，不是焦点问题", source)
-        self.assertIn("拿不到焦点", source)
-
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_the_read_layer_logs(self):
+        source = (ROOT / "src/wechat_ai_assistant/history_read.py").read_text(encoding="utf-8")
+        self.assertIn("LOGGER = logging.getLogger(__name__)", source,
+                      "读取层没有 logger")

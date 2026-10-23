@@ -15,8 +15,9 @@
 每次启动都回到向导起点：**就是那页登录前置页**（已登录时它写着「已经登录」+ 额度，
 点一下「下一步」就进流程），落点不由账号是什么时候恢复的来决定。上次选的会话同时被
 装回来（:meth:`Wizard.restore`），选择会话那一屏照样显示成已勾选，不用重新挑群。
-走完过向导的机器多一个落脚点：首页（:meth:`Wizard.finish` 之后的 ``done`` 屏），
-首页的「再读一次」能回到选择会话那一屏。
+走完过向导的机器多一个动作：「重新开始」直接回第一步（:meth:`Wizard.finish`
+回到「检查微信」），不设仪表盘式的首页 —— 跑完一轮，要么在结果屏看产物，
+要么从头再来。
 
 ## 状态机而不是一堆 if
 
@@ -61,7 +62,6 @@ class WizardStep:
     QUOTA = "quota"
     ANALYZE = "analyze"
     RESULTS = "results"
-    DONE = "done"
 
     #: **流程事实只此一处**：办理步骤 id → (页面标题, 步骤条上的短名)。
     #: 登录是进入流程的前置页，不进入列表、不占编号；编号从「检查微信」开始。
@@ -78,11 +78,9 @@ class WizardStep:
     #: 商户看到的步骤，顺序即 :data:`STEP_SPECS` 的顺序。
     ORDER = tuple(STEP_SPECS)
 
-    #: 步骤标题。不在向导里的两个（额度页、首页）也留着：额度页与智能整理同一屏，
-    #: 首页是跑完之后的落脚点。
+    #: 步骤标题。不在向导里的额度页也留着：它与智能整理同一屏。
     TITLES = {LOGIN: "登录产品账号", **{step: spec[0] for step, spec in STEP_SPECS.items()}}
     TITLES[QUOTA] = STEP_SPECS[ANALYZE][0]
-    TITLES[DONE] = "可以开始用了"
 
     #: 步骤条上的短名（窄窗口放不下长标题）。
     SHORT = {step: spec[1] for step, spec in STEP_SPECS.items()}
@@ -101,7 +99,7 @@ class WizardStep:
         界面不要自己拼这个字符串：编号和标题都从这里来，才不会出现
         "标题写第 1 步、步骤条圆点写 2" 这种自相矛盾。
         """
-        if step in (cls.LOGIN, cls.DONE):
+        if step == cls.LOGIN:
             return cls.TITLES[step]
         if step == cls.QUOTA:
             step = cls.ANALYZE
@@ -298,6 +296,10 @@ class Wizard:
         #: 进入登录页或真正的第 0 步。
         self.step = WizardStep.LOGIN
         self.history_result: HistoryResult | None = None
+        #: 这一轮智能整理**跑完了没有**。跑完先停在整理屏让商户看流式结论
+        #: （看完自己点「下一步」），不许自动跳到分析详情 —— 以前跑完直接
+        #: 换屏，正文一闪而过。判据只此一处，``advance()`` 和界面都问它。
+        self._analysis_ready = False
         self.quota = QuotaView()
         self._lock = threading.RLock()
         self._analyzed_ids: list[str] = []
@@ -392,6 +394,11 @@ class Wizard:
         self._go(WizardStep.WECHAT)
         return True
 
+    @property
+    def analysis_ready(self) -> bool:
+        """这一轮整理跑完了没有（界面渲染和 :meth:`advance` 的门禁都问它）。"""
+        return self._analysis_ready
+
     def advance(self) -> dict[str, Any]:
         """把向导往前推一步 —— 界面上所有「下一步」共用这一个判据。
 
@@ -423,7 +430,13 @@ class Wizard:
                         "reason": "还没有读取结果，先点「更新消息」或「读取全部」。"}
             # 读到的结果就画在这一屏上：「核对」与「读取」是同一屏，
             # 不再单开一步把同一张表再画一遍。
+            self._analysis_ready = False
             self._go(WizardStep.ANALYZE)
+        elif step == WizardStep.ANALYZE:
+            if not self._analysis_ready:
+                return {"ok": False, "step": step,
+                        "reason": "先点「开始 AI 整理」跑完这一轮，再看结果。"}
+            self._go(WizardStep.RESULTS)
         elif step == WizardStep.RESULTS:
             # 分析详情是最后一屏：这里的「回到首页」就是结束向导。
             self.finish()
@@ -447,18 +460,6 @@ class Wizard:
         self._go(WizardStep.ORDER[index - 1])
         with self._lock:
             return {"ok": True, "step": self.step, "reason": ""}
-
-    def reread(self) -> str:
-        """首页的「再读一次」：回到「选择会话」。
-
-        范围确认与选择会话是同一屏，所以回的就是那一屏 —— 商户可以改勾选、
-        也可以直接点「更新消息 / 读取全部」。
-        以前页面直接调 :meth:`back`，而首页（``done``）不在要走的步骤里，
-        ``back`` 只会回一句「这一步没有上一步。」—— 首页那行提示
-        「去微信里聊完，回来再读一次就更新了」于是永远点不动。
-        """
-        self._go(WizardStep.CONVERSATIONS)
-        return self.step
 
     def product_gate_open(self) -> bool:
         """放行判据：产品账号已登录。判据只此一处，界面与跳转都问它。"""
@@ -763,6 +764,7 @@ class Wizard:
             raise RuntimeError("还没登录产品账号，先登录再整理。")
         self.require_quota()
         self._go(WizardStep.ANALYZE)
+        self._analysis_ready = False
         ids = list(message_ids) if message_ids is not None else self._pending_message_ids()
         outcomes: list[dict[str, Any]] = []
         submitted = 0
@@ -803,10 +805,9 @@ class Wizard:
             f"整理完成：处理 {summary['processed']} 条，生成订单 {summary['with_result']} 条，"
             f"需要核对 {summary['needs_review']} 条，本次实际扣费 {charged_micro_usd} 次"
         )
-        # **不直接 finish()**：先让商户看到这一批的结果和明细（角色整理更是只有
-        # 这一屏能看），由「回到首页」再结束。以前这里直接跳首页，于是
-        # 「AI分析详情」永远到不了，整理明细也就再也没有入口。
-        self._go(WizardStep.RESULTS)
+        # **不自动跳屏**：跑完先停在整理屏，让商户看完流式结论自己点
+        # 「下一步」进分析详情。以前跑完直接换屏，正文一闪而过。
+        self._analysis_ready = True
         return summary
 
     def _analyze_with_role(self, role_def: Any, message_ids: Sequence[str] | None) -> dict[str, Any]:
@@ -823,6 +824,7 @@ class Wizard:
             raise RuntimeError("还没登录产品账号，先登录再整理。")
         self.require_quota()
         self._go(WizardStep.ANALYZE)
+        self._analysis_ready = False
         outcome = dict(self.role_analyzer(role_def.id, message_ids) or {})
         if outcome.get("error"):
             # "没有新消息"不是失败：这一批该角色已经分析完了（水位线到头）。
@@ -834,7 +836,7 @@ class Wizard:
                 summary = self._role_summary(role_def, str(stored.get("summary") or ""),
                                              int(stored.get("total") or 0),
                                              reused_from_store=True)
-                self._go(WizardStep.RESULTS)
+                self._analysis_ready = True
                 return summary
             raise RuntimeError(str(outcome["error"]))
         if outcome.get("cancelled"):
@@ -846,7 +848,8 @@ class Wizard:
                                      int(outcome.get("message_count") or 0),
                                      outcome=outcome)
         self._log(f"AI 整理完成（{role_def.name}）：处理 {summary['processed']} 条消息")
-        self._go(WizardStep.RESULTS)
+        # 停在整理屏给商户看结论，点「下一步」再去分析详情。
+        self._analysis_ready = True
         return summary
 
     def _stored_role_report(self, role_id: str) -> dict[str, Any] | None:
@@ -979,17 +982,20 @@ class Wizard:
     # ------------------------------------------------------------- ⑥ 完成
 
     def finish(self) -> None:
-        """结束向导：记下「走完了」，回首页。只有「回到首页」该调它。"""
+        """结束向导：记下「走完了」，回到第一步重新开始。
+
+        「重新开始」就是回到第一步，不设仪表盘式的首页 —— 跑完一轮，
+        商户要么在结果屏看产物，要么从头再来。
+        """
         self.settings.wizard_complete = True
         self.save()
-        self._go(WizardStep.DONE)
+        self._go(WizardStep.WECHAT)
 
     def has_finished(self) -> bool:
-        """向导走完过没有。界面据此决定"有没有一个首页可以回"。
+        """向导走完过没有。界面据此决定读取那屏要不要摆「重新开始」。
 
-        第一次用的商户没有首页可言（首页上什么都没有），所以「再读一次」
-        之后不能给他摆一个「回到首页」；走完过的商户必须有 —— 否则他点了
-        「再读一次」改主意，就只能在向导里一路读下去才回得去。
+        第一次用的商户还在他的第一轮里，用「上一步」退就够了；走完过的
+        商户读了新消息后改主意，要能直接回到第一步重来，不用一路点回去。
         """
         return bool(self.settings.wizard_complete)
 

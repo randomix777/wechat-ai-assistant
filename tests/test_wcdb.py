@@ -461,6 +461,53 @@ class ZstdMessagesTests(unittest.TestCase):
         finally:
             tmp.cleanup()
 
+    def test_compressed_image_xml_still_carries_the_sender(self):
+        """非文本群消息同样带 `发送人:\\n` 前缀（在 ZSTD 帧里）。
+
+        回归真机 case：图片消息解压后是 ``wxid_x:\\n<msg><img …/>``，
+        旧代码只对 local_type=1 解发送人，图片全被归到会话名 ——
+        模型只能写「发送人未识别」。正文仍按类型规则为空。
+        """
+        import hashlib as _hashlib
+
+        import zstandard
+
+        from wechat_ai_assistant.wcdb import read_messages
+
+        tmp = tempfile.TemporaryDirectory(prefix="pyw-zstd-img-")
+        try:
+            contact = Path(tmp.name) / "contact.db"
+            message = Path(tmp.name) / "message.db"
+            con = sqlite3.connect(str(contact))
+            try:
+                con.execute("CREATE TABLE contact (id INTEGER PRIMARY KEY, username TEXT, "
+                            "remark TEXT, nick_name TEXT, local_type INTEGER)")
+                con.execute("INSERT INTO contact VALUES (11,'wxid_a','张姐','xiaozhang',1)")
+                con.commit()
+            finally:
+                con.close()
+            table = "Msg_" + _hashlib.md5("g@chatroom".encode()).hexdigest()
+            frame = zstandard.ZstdCompressor().compress(
+                'wxid_a:\n<?xml version="1.0"?><msg><img aeskey="k" '
+                'cdnthumburl="x"/></msg>'.encode())
+            mcon = sqlite3.connect(str(message))
+            try:
+                mcon.execute("CREATE TABLE %s (local_id INTEGER, server_id INTEGER, "
+                             "local_type INTEGER, sort_seq INTEGER, create_time INTEGER, "
+                             "message_content BLOB)" % table)
+                mcon.execute("INSERT INTO %s VALUES (?,?,?,?,?,?)" % table,
+                             (1, 998, 3, 1000, RECENT_TIMESTAMP, frame))
+                mcon.commit()
+            finally:
+                mcon.close()
+            got = read_messages([message], contact, "g@chatroom", 10)
+            self.assertEqual(len(got), 1)
+            self.assertEqual((got[0].sender_username, got[0].sender_display,
+                              got[0].content, got[0].kind),
+                             ("wxid_a", "张姐", "", "图片"))
+        finally:
+            tmp.cleanup()
+
 
 class MemberNameHintTests(unittest.TestCase):
     """微信没给群名时，用成员名拼一个替代名。

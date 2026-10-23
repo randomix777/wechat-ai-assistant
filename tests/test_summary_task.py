@@ -37,7 +37,8 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 for extra in ("src", "packages/business_agent/src", "packages/order_agent/src"):
     sys.path.insert(0, str(ROOT / extra))
 
-from wechat_ai_assistant import summary_task  # noqa: E402
+from wechat_ai_assistant import summary_task
+from wechat_ai_assistant.utils import UNRESOLVED_TIMESTAMP  # noqa: E402
 from wechat_ai_assistant.orders import OrderStore  # noqa: E402
 
 GROUP = "鲜果群"
@@ -681,6 +682,63 @@ class WatermarkTests(unittest.TestCase):
         # 水位线已推进，第三次再取应为空
         third = summary_task.messages_for_summary(self.app, result, role_id="r1")
         self.assertEqual(len(third), 0)
+
+    def test_unknown_timestamps_do_not_float_above_the_watermark(self):
+        """占位时间「（时间未识别）」不得悬浮在水位线上方。
+
+        真机 case：老导入的撤回/系统消息占位行，字符串排序永远高于真实日期
+        —— 每轮增量都被当成"新消息"重发重计费，还会把水位线顶成占位串，
+        之后真实新消息反而永远排不进增量。占位行按入库时间参与比较。
+        """
+        self.store.add_import(self.tenant, GROUP, [
+            {"sender": "张姐", "content": "\"张姐\" recalled a message",
+             "kind": "other", "sent_at": UNRESOLVED_TIMESTAMP,
+             "source_id": "legacy-1", "stable_source_id": True}], "legacy", "demo")
+        with self.store.db:
+            self.store.db.execute(
+                "UPDATE messages SET observed_at='2026-10-13T01:16:41'"
+                " WHERE merchant_id=? AND source_id='legacy-1'", (self.tenant,))
+        self._add("real", [("张姐", "要两箱苹果", "text")] * 2)
+        result = _result(self.store, self.tenant, total=3)
+        first = summary_task.messages_for_summary(self.app, result, role_id="r1")
+        self.assertEqual(len(first), 3)
+
+        wm = summary_task._get_watermark(self.store, self.tenant, GROUP, "r1")
+        self.assertIsNotNone(wm)
+        self.assertNotEqual(wm[1], UNRESOLVED_TIMESTAMP, "水位线不许被顶成占位串")
+
+        second = summary_task.messages_for_summary(self.app, result, role_id="r1")
+        self.assertEqual(second, [], "占位行不许再浮上来重发一遍")
+
+        self._add("new", [("李叔", "李记酱油 2 瓶", "text")], time_offset=5)
+        third = summary_task.messages_for_summary(self.app, result, role_id="r1")
+        self.assertEqual([m["content"] for m in third], ["李记酱油 2 瓶"],
+                         "水位线没被占位串堵死：真实新消息要能进增量")
+
+    def test_a_poisoned_watermark_recovers_without_rebilling(self):
+        """存量里被占位串堵死的水位线（真机 case）：读取时补一个等价水位线。
+
+        落笔那一刻已入库的消息全都分析过了 —— 按"落笔时已入库消息的最大
+        比较键"补，老消息不重算（不重复计费），之后的新消息能进增量。
+        """
+        imported = self._add("old", [("张姐", "要两箱苹果", "text")])
+        result = _result(self.store, self.tenant, total=1)
+        first = summary_task.messages_for_summary(self.app, result, role_id="r1")
+        self.assertEqual(len(first), 1)
+        # 老消息的入库时间也要在"落笔"之前，模拟当时的存量。
+        with self.store.db:
+            self.store.db.execute(
+                "UPDATE messages SET observed_at='2026-10-21T10:00:00'"
+                " WHERE merchant_id=? AND source_id='old-0'", (self.tenant,))
+            self.store.db.execute(
+                "UPDATE analysis_watermarks SET last_sent_at=?, updated_at='2026-10-21T23:00:00'"
+                " WHERE merchant_id=? AND group_id=? AND role_id='r1'",
+                (UNRESOLVED_TIMESTAMP, self.tenant, GROUP))
+
+        self._add("new", [("李叔", "李记酱油 2 瓶", "text")], time_offset=2)
+        got = summary_task.messages_for_summary(self.app, result, role_id="r1")
+        self.assertEqual([m["content"] for m in got], ["李记酱油 2 瓶"],
+                         "补水位线只放行新消息：老消息不许重算")
 
     def test_the_import_batch_path_also_respects_the_role_watermark(self):
         """旧结果对象那条路（只有 import_ids、没有 coverage）也必须按角色增量。

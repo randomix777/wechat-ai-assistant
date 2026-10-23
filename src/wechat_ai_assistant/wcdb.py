@@ -854,18 +854,20 @@ def read_messages(message_dbs: Sequence[Path], contact_db: Path, username: str,
     rows = merged[-max(1, int(limit or 0)):]
     # 发送人批量解备注：一条群几百条消息只查一轮通讯录。
     # 先解压：长文本/图片元数据是 ZSTD 整段压的，不解连发送人前缀都看不到。
+    # **发送人前缀不是文本消息独有的**：图片/视频的 XML 同样是
+    # ``wxid:\n<内容>`` 整段压进帧里 —— 以前只对文本解，非文本的发送人
+    # 全被归到会话名，模型只能写「发送人未识别」。
     senders: set[str] = set()
     plain_text: dict[int, str] = {}
     for index, row in enumerate(rows):
         try:
-            if int(row["local_type"] or 0) == 1:
-                raw = _maybe_decompress(row["message_content"])
-                text = raw.decode("utf-8", errors="replace") if isinstance(
-                    raw, (bytes, bytearray)) else str(raw or "")
-                plain_text[index] = text
-                sender = _split_sender(text)[0]
-                if sender:
-                    senders.add(sender)
+            raw = _maybe_decompress(row["message_content"])
+            text = raw.decode("utf-8", errors="replace") if isinstance(
+                raw, (bytes, bytearray)) else str(raw or "")
+            plain_text[index] = text
+            sender = _split_sender(text)[0]
+            if sender:
+                senders.add(sender)
         except (TypeError, ValueError):
             continue
     resolved: dict[str, str] = {}
@@ -897,9 +899,13 @@ def read_messages(message_dbs: Sequence[Path], contact_db: Path, username: str,
         if local_type == 1:
             # 解压过的正文直接用（上面批量解备注时已解好，不解两遍）。
             sender, body = _split_sender(plain_text.get(index, ""))
-        elif local_type == 10000:
-            body = _strip_tags(row["message_content"] if isinstance(
-                row["message_content"], str) else "")
+        else:
+            # 非文本群消息同样带 `发送人:\n` 前缀（在压缩帧里，上面已解好）。
+            # 正文仍按类型规则给（图片正文不喂模型），只把发送人认出来。
+            sender = _split_sender(plain_text.get(index, ""))[0]
+            if local_type == 10000:
+                body = _strip_tags(row["message_content"] if isinstance(
+                    row["message_content"], str) else "")
         try:
             timestamp = int(row["create_time"] or 0)
         except (TypeError, ValueError):

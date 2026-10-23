@@ -105,6 +105,16 @@ class WebWizardFlowTests(unittest.TestCase):
         with urllib.request.urlopen(self.base + "/wizard", timeout=15) as r:
             return r.status, r.read().decode("utf-8")
 
+    def test_going_home_returns_to_the_first_step(self):
+        """「重新开始」= 回到第一步（检查微信），不再有仪表盘式首页。"""
+        self.app.wizard._go(WizardStep.RESULTS)
+        self.post("/api/wizard/home")
+        data = self.state()
+        self.assertEqual(data["step"], WizardStep.WECHAT)
+        self.assertNotIn("home", data, "不再有「首页数据」这一页")
+        self.assertEqual(data["steps"][0]["state"], "current",
+                         "第一步重新变成当前步")
+
     def test_gate_is_closed_before_login_and_the_login_page_is_not_a_step(self):
         """没登录就停在登录页；登录页是**前置门槛**，不占编号、不在步骤条里。
 
@@ -135,7 +145,6 @@ class WebWizardFlowTests(unittest.TestCase):
         self.assertEqual(data["step"], WizardStep.LOGIN, "退出后要回登录页")
         self.assertFalse(data["product_gate_open"], "退出后门禁必须关上")
         self.assertFalse(data["account"]["logged_in"])
-        self.assertIsNone(data["home"], "退出后首页数据不该还挂着")
 
     def test_the_report_comes_back_from_disk_after_a_restart(self):
         """报告落盘的意义：重启后「查看 AI 整理报告」还拿得到。
@@ -243,34 +252,24 @@ class WebWizardFlowTests(unittest.TestCase):
         self.assertTrue(self.post("/api/wizard/advance")["ok"])
         self.assertEqual(self.state()["step"], WizardStep.ANALYZE)
 
-    def test_the_results_screen_sends_you_home_and_home_can_read_again(self):
-        """「回到首页」结束向导；首页的「再读一次」回选会话那一屏。
-
-        以前「再读一次」调的是 ``/api/wizard/back``，而首页不在步骤里，
-        ``back`` 只会回一句「这一步没有上一步。」—— 按钮等于坏的。
-        """
+    def test_the_results_screen_restart_returns_to_the_first_step(self):
+        """结果屏的「重新开始」结束向导：记下走完了，回到第一步。"""
         self.app.session = _Session()
         self.app.wizard.step = WizardStep.RESULTS
         self.assertTrue(self.post("/api/wizard/home")["ok"])
-        self.assertEqual(self.state()["step"], WizardStep.DONE)
-        self.assertEqual({row["state"] for row in self.state()["steps"]}, {"done"},
-                         "到了首页，整条步骤条都该是已完成")
+        data = self.state()
+        self.assertEqual(data["step"], WizardStep.WECHAT)
+        self.assertEqual(data["steps"][0]["state"], "current")
 
-        self.assertTrue(self.post("/api/wizard/reread")["ok"])
-        self.assertEqual(self.state()["step"], WizardStep.CONVERSATIONS)
-
-    def test_you_can_get_back_home_after_reading_again(self):
-        """「再读一次」之后改主意要能回首页；没走完过的商户没有这个按钮。"""
+    def test_can_go_home_only_after_finishing(self):
+        """「重新开始」只对走完过的商户出现；点它回第一步。"""
         self.app.session = _Session()
-        self.assertFalse(self.state()["can_go_home"], "还没走完就不该有首页可回")
+        self.assertFalse(self.state()["can_go_home"], "还没走完就不该有「重新开始」")
 
         self.app.wizard.finish()
         self.assertTrue(self.state()["can_go_home"])
-        self.post("/api/wizard/reread")
-        self.assertEqual(self.state()["step"], WizardStep.CONVERSATIONS)
-
         self.assertTrue(self.post("/api/wizard/home")["ok"])
-        self.assertEqual(self.state()["step"], WizardStep.DONE)
+        self.assertEqual(self.state()["step"], WizardStep.WECHAT)
 
     def test_reading_without_a_selection_is_refused_with_the_same_sentence(self):
         """一个会话都没勾就点「读取」：不许开读，说法和「下一步」那句一致。"""
@@ -391,6 +390,72 @@ class WebWizardFlowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class AnalysisProgressTests(unittest.TestCase):
+    """分析进度：日志里留一份，界面上再给一句短的。
+
+    模型出第一个字之前可能等几十秒（实测最长的一个会话等了 48 秒）。
+    这段时间界面只有一个空框的话，商户只会以为卡死了 —— 有一句
+    「正在分析第 2/3 个会话：某某群」才知道软件在动。
+    """
+
+    def test_progress_reaches_the_state_the_page_polls(self):
+        import types
+        from wechat_ai_assistant import web_server
+        from wechat_ai_assistant.application import AppEvents, MerchantApplication
+
+        state = web_server.WebState(app=types.SimpleNamespace())
+        events = AppEvents()
+        web_server.attach_events(types.SimpleNamespace(events=events), state)
+        logged = []
+        events.on_log = lambda line: logged.append(line)
+
+        app = types.SimpleNamespace(events=events)
+        MerchantApplication._analysis_progress(app, "正在分析第 2/3 个会话：某某群")
+
+        self.assertEqual(state.snapshot()["analysis_progress"], "正在分析第 2/3 个会话：某某群")
+        self.assertIn("正在分析第 2/3 个会话：某某群", logged, "日志里也要留一份")
+
+
+class NoStreamReplayTests(unittest.TestCase):
+    """完成态的直播区不许空着。
+
+    商户在整理屏看到的正文就是这次的分析输出；没有流式正文（比如"这次没有
+    新消息，显示上次报告"，模型一次都没调）时，服务端要把落盘的报告回放进
+    直播区 —— 否则那一屏正文框是空的，商户只会以为整理失败了。
+    """
+
+    @staticmethod
+    def _run(summary: dict, prefill_stream: str = ""):
+        import types
+        from wechat_ai_assistant import web_server
+
+        state = web_server.WebState(app=types.SimpleNamespace())
+        if prefill_stream:
+            state.stream_summary(prefill_stream)
+        app = types.SimpleNamespace(analyze=lambda role: summary)
+        web_server.WebHandler._do_analyze(
+            types.SimpleNamespace(app=app, state=state))
+        return state
+
+    def test_no_stream_replays_the_stored_report(self):
+        state = self._run({
+            "role_id": "generic", "output_kind": "report", "processed": 3,
+            "role_report": {"summary": "需要注意：张姐记得带身份证"},
+        })
+        self.assertEqual(
+            state.summary_stream, "需要注意：张姐记得带身份证",
+            "没有流式正文时，报告要回放进直播区")
+
+    def test_a_streamed_run_is_not_overwritten(self):
+        state = self._run({
+            "role_id": "generic", "output_kind": "report", "processed": 3,
+            "role_report": {"summary": "完整报告正文"},
+        }, prefill_stream="第一批正文……第二批正文……")
+        self.assertTrue(
+            state.summary_stream.startswith("第一批正文"),
+            "流过的正文一个字都不能被回放覆盖")
+
 
 class ReadingNoticeTests(unittest.TestCase):
     """「正在读数据库」这类过程说明只进小字，不进顶部横幅。

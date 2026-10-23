@@ -394,14 +394,27 @@ class HomeView:
         return "微信正常" if self.wechat_ready else self.wechat_detail or "微信状态未知"
 
     def summary_line(self) -> str:
-        """一句话摘要。"""
+        """一句话摘要。
+
+        「数据来源」那半句来自 :func:`merchant_text.data_origin_note` —— 演示数据、
+        规则整理都要如实说出来。**以前这里读的是 ``self.mode_note``**，那个字段
+        早就改名/删掉了，于是每次算首页都抛 ``AttributeError``，被
+        ``web_server._home_now`` 悄悄咽掉，首页永远是一句「正在汇总……」。
+        """
+        from .merchant_text import data_origin_note
+
         if not self.wechat_ready:
             return self.wechat_detail or "请先完成微信登录"
         clar = f"，待澄清 {len(self.clarifications)} 条" if self.clarifications else ""
-        return (
-            f"{self.conversation or '未选择会话'}　{self.mode_note}　"
-            f"有效订单 {len(self.effective)} 单，需要处理 {self.exceptions} 单{clar}，{self.quota_headline}"
-        )
+        parts = [self.conversation or "未选择会话"]
+        origin = data_origin_note(self)
+        if origin:
+            parts.append(origin)
+        tail = (f"有效订单 {len(self.effective)} 单，需要处理 {self.exceptions} 单{clar}")
+        if self.quota_headline:
+            tail += f"，{self.quota_headline}"
+        parts.append(tail)
+        return "　".join(parts)
 
 
 __all__ = [

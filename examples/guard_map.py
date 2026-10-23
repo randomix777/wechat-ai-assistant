@@ -48,6 +48,8 @@ GUARDS: list[tuple[str, str, tuple[str, ...]]] = [
       "test_the_listen_button_survives_the_smallest_window")),
     ("装死", "读了 35 条却只入库 0 条，商户不知道",
      ("test_read_but_not_stored_says_so", "test_the_two_are_not_the_same_message")),
+    ("装死", "服务停了只会喊「正在重试」，不给商户出路",
+     ("关掉窗口重开", "test_when_the_service_is_gone_it_says_what_to_do")),
     ("假装", "维护按钮和主按钮一样重", ("维护按钮都比主按钮弱",)),
     ("假装", "不会发送时摆着发送开关",
      ("不会发送时不显示发送开关", "暂停后「恢复发送」仍在")),
@@ -65,8 +67,6 @@ GUARDS: list[tuple[str, str, tuple[str, ...]]] = [
       "test_it_no_longer_silently_drops_orders_past_a_limit")),
     ("假装", "长内容被截断却看不出来",
      ("过长时带省略号", "test_long_text_is_marked_as_truncated")),
-    ("假装", "两遍遍历结果不一致却没人知道",
-     ("test_two_passes_over_one_list_agree",)),
 ]
 
 

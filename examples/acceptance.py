@@ -210,7 +210,7 @@ def check_ui_contract() -> Result:
             problems.append("页面没渲染出来")
         if not state.get("steps"):
             problems.append("步骤条是空的")
-        if state.get("step") not in list(WizardStep.ORDER) + [WizardStep.LOGIN, WizardStep.DONE]:
+        if state.get("step") not in list(WizardStep.ORDER) + [WizardStep.LOGIN]:
             problems.append(f"未知步骤：{state.get('step')}")
         roles = state.get("roles") or []
         if len(roles) < 3:

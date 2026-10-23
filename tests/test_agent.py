@@ -10,48 +10,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
-from wechat_ai_assistant.utils import UNRESOLVED_SENDER
 
 from wechat_ai_assistant.agent import AgentConfig, AgentStore, LocalAgent
 from wechat_ai_assistant.Errors import NoSuchFriendError
 from wechat_ai_assistant.cloud import CloudClient, CloudError
 from wechat_ai_assistant.cloud_server import _load_agent_tokens, create_server
 from wechat_ai_assistant.reliability import MessageEvent
-from wechat_ai_assistant.utils import parse_group_chat_history, parse_group_messages
 
 
 class AgentTests(unittest.TestCase):
-    def test_group_history_alignment_does_not_shift_rows(self):
-        with_name = [
-            ("【wechat_ai_assistant 端到端测试】这是一条自动化测试消息，请忽略。 2026-9-25 11:47", "mmui::ChatTextItemView", []),
-            ("他们回来没有阿？ 2026-9-24 15:32", "mmui::ChatTextItemView", []),
-        ]
-        without_name = [
-            ("他们回来没有阿？ 2026-9-24 15:32", "mmui::ChatTextItemView", []),
-            ("Channels菊姐懂婴语 2026-9-24 15:31", "mmui::ChatBubbleItemView", []),
-        ]
-        contents, senders, timestamps, message_types = parse_group_chat_history(with_name, without_name, [])
-        self.assertEqual(contents[0], "【wechat_ai_assistant 端到端测试】这是一条自动化测试消息，请忽略。")
-        self.assertEqual(contents[1], "他们回来没有阿？")
-        # 微信在聊天记录列表里不暴露昵称，切不出发送人。这里曾经断言 is None ——
-        # 那是把缺陷当成了期望值：真机读到的 20 条消息发送人全是 None，无从归属
-        # 客户。现在四个分支统一回落到同一个占位符。
-        self.assertEqual(senders[0], UNRESOLVED_SENDER)
-        # 原来写的是「红包或转账(无法获取发送人)」。**那是说假话**：
-        # 实测一个群里 107 条消息全是这个占位串，而**红包 0 条**。
-        self.assertNotIn("红包", senders[0])
-        self.assertTrue(all(senders))
-        self.assertEqual(timestamps[0], "2026-9-25 11:47")
-        self.assertEqual(message_types[0], "文本")
-
-    def test_group_messages_extracts_sender_when_pairs_are_aligned(self):
-        with_name = [("Alice hello 2026-9-24 15:32", "mmui::ChatTextItemView", [])]
-        without_name = [("hello 2026-9-24 15:32", "mmui::ChatTextItemView", [])]
-        contents, senders, message_types = parse_group_messages(with_name, without_name, [])
-        self.assertEqual(contents, ["hello"])
-        self.assertEqual(senders, ["Alice"])
-        self.assertEqual(message_types, ["文本"])
-
     def test_local_agent_serializes_dialog_operations(self):
         active = 0
         maximum = 0

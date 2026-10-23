@@ -159,8 +159,8 @@ class WebState:
     def __init__(self, app: Any = None) -> None:
         self._lock = threading.RLock()
         #: 放行判据要拿真实的 orders/tenant。**不能拿占位对象**——
-        #: 那样 ``has_messages_for`` 永远返回 False，「能不能摘要」就成了
-        #: 一个恒为假的开关，页面上表现为「明明读到消息却不让整理」。
+        #: 那样「有没有消息可整理」永远返回 False，页面上就表现为
+        #: 「明明读到消息却不让整理」。
         self.app = app
         self.logs: deque[str] = deque(maxlen=LOG_LINES)
         self.error: str = ""
@@ -168,9 +168,8 @@ class WebState:
         self.busy: str = ""
         #: 读取进度（HistoryProgress 的可见部分）
         self.progress: dict[str, Any] | None = None
-        #: 上一次读取的结果。有它才能摘要、才能判断「能不能下一步」。
+        #: 上一次读取的结果。有它才能整理、才能判断「能不能下一步」。
         self.history: Any = None
-        self.summary: dict[str, Any] | None = None
         self.analysis: dict[str, Any] | None = None
         #: 上一次非订单角色的 AI 报告。**不进轮询** —— 全文不该每秒回传；
         #: 页面点「查看 AI 整理报告」时按需取。
@@ -179,8 +178,12 @@ class WebState:
         #: ``/api/state`` 就能看到"正在一段段出来"，不用等最后全文。
         #: 只保留最近 ~200KB，多会话长分析不会把内存撑爆。
         self.summary_stream: str = ""
-        #: 取消本次摘要。浏览器点取消即置位，后台线程在批次间隙停下。
-        self.summary_cancel = threading.Event()
+        #: 模型**推理过程**的增量（和报告正文分开存）。
+        #: 正文之前那几十秒只有这段字可看；上限比正文小一点，够显示最近的想法。
+        self.reasoning_stream: str = ""
+        #: 分析进度的一句话（"正在分析第 2/3 个会话：xxx"）。
+        #: 模型出第一个字之前可能等几十秒，没有这句商户只会以为卡死了。
+        self.analysis_progress: str = ""
         self.conversations: list[dict[str, Any]] = []
         self.conversation_cache_info: str = ""
         self.orders: list[dict[str, Any]] = []
@@ -229,6 +232,14 @@ class WebState:
     def reset_summary_stream(self) -> None:
         with self._lock:
             self.summary_stream = ""
+            self.reasoning_stream = ""
+
+    def stream_reasoning(self, fragment: str) -> None:
+        """追加一段推理过程。和正文分两个字段：混在一起，商户会把思考当结论。"""
+        if not fragment:
+            return
+        with self._lock:
+            self.reasoning_stream = (self.reasoning_stream + fragment)[-60_000:]
 
     def fail(self, message: str) -> None:
         with self._lock:
@@ -304,7 +315,7 @@ class WebState:
             return False
 
     def _can_go_home(self) -> bool:
-        """有没有首页可以回。问向导（走完过没有），没有向导的替身按"没有"处理。"""
+        """要不要摆「重新开始」。问向导（走完过没有），没有向导的替身按"没有"处理。"""
         wizard = getattr(self.app, "wizard", None)
         finished = getattr(wizard, "has_finished", None)
         if finished is None:
@@ -331,17 +342,6 @@ class WebState:
             if name:
                 names.append(name)
         return names
-
-    def _home_now(self) -> dict[str, Any] | None:
-        """首页数据。算不出来（假 app、库还没建好）就当没有，不抛。"""
-        home = getattr(self.app, "home", None)
-        if not callable(home):
-            return None
-        try:
-            return _home_view(home())
-        except Exception:
-            LOGGER.debug("home view skipped", exc_info=True)
-            return None
 
     def _wechat_view(self) -> dict[str, Any]:
         """微信状态。还没收到事件时回落到监视器的当前值 ——
@@ -370,18 +370,17 @@ class WebState:
                 # 门禁只问向导，页面不许自己按 logged_in 再判一次（两套判据
                 # 迟早一处放行、一处拦下）。
                 "product_gate_open": self._gate_open(),
-                # 走完过的商户才有首页可回：界面据此决定「再读一次」之后
-                # 要不要摆一个「回到首页」（第一次用的人没有首页可言）。
+                # 走完过的商户才有「重新开始」可回（第一次用的人用「上一步」就够）。
                 "can_go_home": self._can_go_home(),
                 "wechat": self._wechat_view(),
                 "selected": self._selected_view(),
                 # 整理角色：页面画选择器用，不自己列一份。
                 "roles": _roles_view(),
-                # 首页数据**只在首页那一步**给：`app.home()` 会顺手检测一次微信，
-                # 而检测可能推动向导（登录完成就往前走）。读状态是只读操作，
-                # 不能因为别人轮询了一次就把商户从别的步骤拽走。
-                "home": self._home_now() if step == WizardStep.DONE else None,
                 "busy": self.busy,
+                # 这一轮整理跑完了没（跑完停在整理屏给商户看，看完自己点下一步）。
+                # 判据在向导（Wizard._analysis_ready），页面只渲染不自己判。
+                "analysis_ready": bool(getattr(getattr(self.app, "wizard", None),
+                                               "analysis_ready", False)),
                 "error": self.error,
                 "notice": self.notice,
                 "reading_notice": self.reading_notice,
@@ -389,17 +388,16 @@ class WebState:
                 "progress": dict(self.progress) if self.progress else None,
                 "logs": list(self.logs),
                 "conversations": list(self.conversations),
-                # 这份名单是从解密库来的（真名真人数），还是内存扫描兜底的（只有群、
-                # 名字可能不全）？界面必须如实显示，否则商户会以为软件坏了。
+                # 这份名单是不是从解密库来的（真名真人数）？解密库不可用时
+                # 会退回上次缓存的那份 —— 界面必须如实显示，商户才知道差别。
                 "conversation_source": str(getattr(self.app, "conversation_source_label", "") or ""),
                 "conversation_cache_info": self.conversation_cache_info,
                 "orders": list(self.orders),
-                "summary": dict(self.summary) if self.summary else None,
                 "summary_stream": self.summary_stream,
+                "reasoning_stream": self.reasoning_stream,
+                "analysis_progress": self.analysis_progress,
                 "analysis": dict(self.analysis) if self.analysis else None,
                 "history": _history_view(history),
-                # 判据直接用共用逻辑，和 Tk 界面是同一份。
-                "can_summarize": summary_task.has_messages_for(self.app, history),
             }
 
 
@@ -433,17 +431,11 @@ def _steps_view(current: str) -> list[dict[str, Any]]:
     """
     # 额度页与智能整理同一屏 —— 和 Tk 步骤条同一套映射。
     current = {WizardStep.QUOTA: WizardStep.ANALYZE}.get(current, current)
-    if current == WizardStep.DONE:
-        # 首页不在要走的步骤里：到了这里，整条步骤条都算走完。
-        # 以前把 done 映射成最后一步，于是首页上最后一颗点一直亮着「当前」，
-        # 看起来像「AI分析还在跑」。
-        position = len(WizardStep.ORDER)
-    else:
-        try:
-            position = WizardStep.number(current)
-        except ValueError:
-            # 还没进向导（空串）或未知步骤：整条都是"未到"，不假装走到哪了。
-            position = -1
+    try:
+        position = WizardStep.number(current)
+    except ValueError:
+        # 还没进向导（空串）或未知步骤：整条都是"未到"，不假装走到哪了。
+        position = -1
     rows: list[dict[str, Any]] = []
     for index, step in enumerate(WizardStep.ORDER):
         if index < position:
@@ -510,58 +502,6 @@ def _roles_view() -> list[dict[str, Any]]:
             "action_label": str(getattr(role, "action_label", "开始 AI 整理") or "开始 AI 整理"),
         })
     return rows
-
-
-def _home_view(view: Any) -> dict[str, Any] | None:
-    """首页（跑完向导的落脚点）里**商户要看的那几项**。
-
-    不整个序列化：``HomeView`` 里有 dataclass、datetime 和几十个字段。
-    页面要的是"现在什么状态、多少单、今天备什么货"。
-    """
-    if view is None:
-        return None
-    stock = []
-    for row in getattr(view, "stock", None) or []:
-        stock.append({
-            "name": str(getattr(row, "name", "")),
-            "quantity": float(getattr(row, "quantity", 0) or 0),
-            "unit": str(getattr(row, "unit", "") or ""),
-            "orders": int(getattr(row, "order_count", 0) or 0),
-            "customers": list(getattr(row, "customers", ()) or ()),
-        })
-    return {
-        "status_line": str(view.status_line()),
-        "summary_line": str(view.summary_line()),
-        "wechat_ready": bool(getattr(view, "wechat_ready", False)),
-        "quota_headline": str(getattr(view, "quota_headline", "") or ""),
-        "scope_text": str(getattr(view, "scope_text", "") or ""),
-        "counters": {
-            "effective": len(getattr(view, "effective", None) or []),
-            "actionable": len(getattr(view, "actionable", None) or []),
-            "payment_claims": len(getattr(view, "payment_claims", None) or []),
-            "clarifications": len(getattr(view, "clarifications", None) or []),
-        },
-        # 待澄清：**不是订单**，是要问客户一句的那些。只给前 50 条 ——
-        # 页面放不下更多，而且商户一次也处理不了那么多。
-        "clarifications": [
-            {
-                "customer": str(item.get("customer") or "（未绑定客户）"),
-                "question": str(item.get("suggested_question") or ""),
-                "group": str(item.get("group_id") or ""),
-            }
-            for item in (getattr(view, "clarifications", None) or [])[:50]
-        ],
-        # 系统解析失败：**不是要问客户的问题**，是软件没跑成。单列，可重试。
-        "system_failures": [
-            {
-                "reason": str(item.get("reason") or ""),
-                "detail": str(item.get("error") or ""),
-                "retryable": bool(item.get("retryable", True)),
-            }
-            for item in (getattr(view, "system_failures", None) or [])[:50]
-        ],
-        "stock": stock,
-    }
 
 
 def _history_view(result: Any) -> dict[str, Any] | None:
@@ -795,7 +735,11 @@ class WebHandler(BaseHTTPRequestHandler):
     def _route_get(self) -> None:
         path = self.path.split("?", 1)[0]
         if path in ("/", "/index.html"):
-            self._send_html(200, page_html(self.data_dir))
+            # 调试页只给开发外壳（``web_dev``，``DEV_RELOAD=True``）用。
+            # 产品里端口上只该有商户版：调试页摆着「整理成一段话」这类老入口，
+            # 商户在浏览器里敲一下地址就能走到另一条路上 —— 那条路已经不收了。
+            which = "dev" if DEV_RELOAD else "wizard"
+            self._send_html(200, page_html(self.data_dir, which))
         elif path in ("/wizard", "/wizard/"):
             # 商户版向导页（第 0～7 步）。调试页留在 /
             self._send_html(200, page_html(self.data_dir, "wizard"))
@@ -858,18 +802,10 @@ class WebHandler(BaseHTTPRequestHandler):
                 self.state.log(f"向导后退：{outcome}")
                 self._send_json(200, outcome)
             elif path == "/api/wizard/home":
-                # 分析详情那一屏的「回到首页」：到这一步才记「向导走完了」。
-                # 以前 analyze 跑完直接 finish()，于是那一屏永远看不到，
-                # 整理明细（尤其是角色整理的）也就再没有入口。
+                # 「重新开始」：到这一步才记「向导走完了」，然后回第一步。
                 self.app.wizard.finish()
-                self.state.log("向导完成，回到首页")
+                self.state.log("向导完成，回到第一步")
                 self._send_json(200, {"ok": True, "step": self.app.wizard.step})
-            elif path == "/api/wizard/reread":
-                # 首页「再读一次」。**不能**用 back()：首页不在步骤里，
-                # back() 只会回一句「这一步没有上一步。」
-                step = self.app.wizard.reread()
-                self.state.log("回到确认读取范围，重新选择更新/全部")
-                self._send_json(200, {"ok": True, "step": step})
             elif path == "/api/wait-for-wechat":
                 # 点完「打开微信」后等商户扫码：监视器会持续检测，登录成功即
                 # 通过 on_wechat 推进状态。不做的话页面永远停在"等待扫码"。
@@ -917,16 +853,16 @@ class WebHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"ok": True})
             elif path == "/api/analyze":
                 role = str(body.get("role") or "order")
+
+                def start() -> None:
+                    # 上一轮的流式正文和进度都要清掉：留着的话，新一轮刚点开
+                    # 就先看见上次的字，商户会以为分析早就开始了。
+                    self.state.reset_summary_stream()
+                    self.state.set(analysis_progress="")
+
                 self._send_json(200, {"ok": True, "started": self._run_blocking(
                     "智能整理", lambda: self._do_analyze(role),
-                    on_start=self.state.reset_summary_stream)})
-            elif path == "/api/summary":
-                self._send_json(200, {"ok": True, "started": self._run_blocking(
-                    "\u6574\u7406\u6210\u4e00\u6bb5\u8bdd", self._do_summary)})
-            elif path == "/api/summary/cancel":
-                self.state.summary_cancel.set()
-                self.state.log("已请求取消摘要（当前批次完成后停下）")
-                self._send_json(200, {"ok": True})
+                    on_start=start)})
             elif path == "/api/login":
                 # 登录是**前置条件**，不是第一步。没登录时智能整理必然失败
                 # （排序依赖云端账号），所以页面开头就要能登录。
@@ -1147,12 +1083,10 @@ class WebHandler(BaseHTTPRequestHandler):
         """
         from . import export_service
 
-        summary = dict(self.state.summary or {})
         analysis = dict(self.state.analysis or {})
         role_report = dict(self.state.role_report or {})
-        report = str(summary.get("summary") or summary.get("analysis_text")
-                     or role_report.get("summary") or "").strip()
-        role_name = str(analysis.get("role_name") or summary.get("role_name") or "").strip()
+        report = str(role_report.get("summary") or "").strip()
+        role_name = str(analysis.get("role_name") or "").strip()
         if not report:
             stored = None
             try:
@@ -1253,23 +1187,13 @@ class WebHandler(BaseHTTPRequestHandler):
         })
         # 角色整理的明细单独存：页面按需拉，别塞进每秒一次的 /api/state。
         self.state.set(role_report=summary.get("role_report") or None)
+        # 没有流式正文时（比如"没有新消息，显示上次报告"）把报告回放进直播区：
+        # 完成态那一屏的正文框不能空着"等待首段"—— 商户要看的就是它。
+        if not self.state.summary_stream:
+            report_text = str((summary.get("role_report") or {}).get("summary") or "")
+            if report_text:
+                self.state.stream_summary(report_text)
         self.state.log(f"\u6574\u7406\u5b8c\u6210\uff1a\u5904\u7406 {summary.get('processed', 0)} \u6761\u6d88\u606f")
-
-    def _do_summary(self) -> None:
-        self.state.reset_summary_stream()
-        self.state.summary_cancel.clear()
-        result = summary_task.run_summary(
-            self.app, self.state.history,
-            on_progress=self.state.log,
-            on_stream=self.state.stream_summary,
-            is_cancelled=self.state.summary_cancel.is_set)
-        self.state.set(summary=result)
-        if result.get("cancelled"):
-            self.state.log("摘要已取消：已完成的分段已保留，重试会复用")
-        elif result.get("error"):
-            self.state.log(f"\u6458\u8981\u5931\u8d25\uff1a{result['error']}")
-        else:
-            self.state.log(f"\u6458\u8981\u5b8c\u6210\uff0c{result.get('message_count', 0)} \u6761\u6d88\u606f")
 
 
 def attach_events(app: MerchantApplication, state: WebState) -> None:
@@ -1321,6 +1245,8 @@ def attach_events(app: MerchantApplication, state: WebState) -> None:
     events.on_step = on_step
     events.on_log = on_log
     events.on_analysis_stream = state.stream_summary
+    events.on_analysis_reasoning = state.stream_reasoning
+    events.on_analysis_progress = lambda line: state.set(analysis_progress=str(line or ""))
     events.on_error = on_error
     events.on_history_progress = on_progress
     events.on_history_done = on_history_done

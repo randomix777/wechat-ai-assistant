@@ -46,7 +46,7 @@ class _FakeWindow:
         self._children = set(children or ())
         self._raises = raises
 
-    def exists(self, timeout: float = 0.0) -> bool:
+    def exists(self, timeout: float = 0.0, visible_only: bool | None = None) -> bool:
         if self._raises:
             raise RuntimeError("UIA 不可用")
         return self._exists
@@ -248,9 +248,17 @@ class StatusCopyShowsTheSpecificReasonTests(unittest.TestCase):
         self.assertEqual(detail, "微信开着，但窗口收起来了")
         self.assertEqual(button, "")
 
-    def test_not_checked_yet_stays_generic(self):
+    def test_not_checked_yet_does_not_announce_a_failure(self):
+        """一次都没检测过，不能显示「暂时无法读取微信界面」。
+
+        反转记录：这条原来断言"没检测过就用通用文案"，而通用文案就是
+        「暂时无法读取微信界面」—— 软件刚启动就先报一个假故障。
+        """
         status = WeChatStatus(WeChatState.UNREADABLE, "尚未检测", checked_at=0.0)
-        self.assertEqual(status.copy()[1], wechat_state.STATE_COPY[WeChatState.UNREADABLE][1])
+        title, detail, button = status.copy()
+        self.assertEqual(title, "正在检测微信状态…")
+        self.assertNotIn("无法读取", detail)
+        self.assertEqual(button, "")
 
     def test_simulated_statuses_stay_generic(self):
         status = WeChatStatus(WeChatState.NOT_STARTED, "模拟微信状态：not_started",
@@ -261,6 +269,26 @@ class StatusCopyShowsTheSpecificReasonTests(unittest.TestCase):
         generic = wechat_state.STATE_COPY[WeChatState.UNREADABLE][1]
         self.assertNotIn("重启电脑", generic, "先给台阶（托盘/重检测），别一上来就重启电脑")
         self.assertIn("重新检测", generic)
+
+    def test_generic_unreadable_does_not_assume_the_window_is_closed(self):
+        """读不到界面**不等于**"你窗口没打开" —— 最常见的其实是电脑忙了一下。
+
+        反转记录：这段文案原先只讲"点托盘图标、退出重开"，可实测里 UIA 查询
+        在机器卡的时候会超时抛错，商户照着"去打开窗口"做一圈，问题还在原地。
+        """
+        generic = wechat_state.STATE_COPY[WeChatState.UNREADABLE][1]
+        self.assertIn("电脑忙", generic, "要把「电脑忙」这个最常见的原因说出来")
+        self.assertLess(generic.index("重新检测"), generic.index("完全退出"),
+                        "先给最省事的一步（等一下再检测），再往上升级")
+        self.assertIn("不影响已经读到的消息", generic, "这句要安抚：读取走本机数据库")
+
+    def test_a_failed_lookup_is_not_reported_as_a_hidden_window(self):
+        """查询本身出错（超时）时，不许说成"窗口收起来了"。"""
+        probe = RealWeChatProbe()
+        probe._find_window(_FakeDesktop(raises=True), wechat_state.MAIN_WINDOW_SPECS)
+        self.assertTrue(probe._lookup_failed)
+        probe._find_window(_FakeDesktop(main=False), wechat_state.MAIN_WINDOW_SPECS)
+        self.assertFalse(probe._lookup_failed, "查得到、只是没有窗口，不算查询失败")
 
 
 class StatusIsAlwaysAnnouncedTests(unittest.TestCase):

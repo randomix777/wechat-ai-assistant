@@ -141,17 +141,6 @@ PAGE = r"""<!DOCTYPE html>
   </section>
 
   <section class="card">
-    <h2>整理成一段话</h2>
-    <p class="hint">把读到的消息交给模型汇总成可读的说明，不生成订单。</p>
-    <div class="row">
-      <button id="sumBtn" class="primary" onclick="post('/api/summary')">整理成一段话</button>
-      <button onclick="post('/api/summary/cancel')">取消整理</button>
-      <span class="muted" id="sumHint"></span>
-    </div>
-    <div id="summary" style="margin-top:12px"></div>
-  </section>
-
-  <section class="card">
     <h2>商品与客户名单</h2>
     <p class="hint">
       表头认中文。商品：编码、名称、单位、价格、别名。客户：名字、群、地址、偏好、别名。<br>
@@ -313,23 +302,11 @@ function render(data) {
       "需要核对 " + a.needs_review + " 单<br>本次提交任务 " + a.submitted_jobs + " 个" +
       (a.already_analyzed ? "<br>已整理过、本次没重复提交 " + a.already_analyzed + " 条" : "") +
       "</div>");
-  }
-
-  // 摘要：最终结果优先；还在跑时显示流式增量，不用干等。
-  // 流式每次内容都变，setHtml 在这里天然每次都写 —— 就是要它实时。
-  const s = data.summary;
-  if (s) {
-    setHtml("summary", s.error
-      ? '<div class="msg bad">' + esc(s.error) + "</div>"
-      : '<div class="out">' + esc(s.summary) +
-        (s.cancelled ? '<br><span class="hint">已取消：以上是已完成部分</span>' : "") + "</div>");
   } else if (data.summary_stream) {
-    setHtml("summary", '<div class="out">' + esc(data.summary_stream) +
+    // 跑着的时候只有流式正文可看（老的那条"不分角色的汇总"已经撤了，流式还在）。
+    setHtml("analysis", '<div class="out">' + esc(data.summary_stream) +
       '<br><span class="hint">正在生成……</span></div>');
   }
-
-  $("sumBtn").disabled = !data.can_summarize;
-  $("sumHint").textContent = data.can_summarize ? "" : "（还没有可用的消息，先读取历史）";
 
   // 日志
   if (data.logs && data.logs.length) $("logs").textContent = data.logs.join("\n");

@@ -104,41 +104,48 @@ class AdvanceTests(unittest.TestCase):
         self.assertEqual(wizard.step, WizardStep.ANALYZE)
 
     def test_the_results_step_ends_the_wizard(self):
-        """分析详情是最后一屏：走到它的「回到首页」才算走完（finish）。"""
+        """分析详情是最后一屏：它的「重新开始」（finish）记下走完并回第一步。"""
         wizard = _wizard()
         wizard.step = WizardStep.RESULTS
-        self.assertFalse(wizard.settings.wizard_complete, "还没回到首页就不算走完")
+        self.assertFalse(wizard.settings.wizard_complete, "还没点「重新开始」就不算走完")
         self.assertTrue(wizard.advance()["ok"])
-        self.assertEqual(wizard.step, WizardStep.DONE)
+        self.assertEqual(wizard.step, WizardStep.WECHAT)
         self.assertTrue(wizard.settings.wizard_complete)
 
-    def test_analyzing_stops_on_the_results_step(self):
-        """整理完停在「分析详情」，不是直接跳首页。
+    def test_analyzing_stays_for_review_then_advances(self):
+        """整理完**停在整理屏**让商户看流式结论，点「下一步」才进分析详情。
 
-        那一屏是唯一能看到这次整理结果和明细的地方（角色整理的产出只有它），
-        以前 analyze 里直接 finish()，于是那一屏永远到不了。
+        以前 analyze 跑完自动换屏，正文一闪而过；判据只有 advance() 这一处。
         """
         from wechat_ai_assistant.wizard import QuotaView
 
         wizard = _wizard(
             selected=True,
             role_analyzer=lambda role_id, message_ids: {
-                "summary": "### 待办事项\n- 张姐：记得带身份证", "message_count": 1},
+                "summary": "要注意：张姐说记得带身份证。", "message_count": 1},
         )
         # 角色整理也过额度门，给一份够用的快照就不用联网查。
         wizard.quota = QuotaView(logged_in=True, active=True, remaining=100)
         summary = wizard.analyze(role="generic", message_ids=[])
-        self.assertEqual(wizard.step, WizardStep.RESULTS)
+        self.assertEqual(wizard.step, WizardStep.ANALYZE, "跑完停在整理屏")
+        self.assertTrue(wizard._analysis_ready)
         self.assertIn("role_report", summary)
-        self.assertFalse(wizard.settings.wizard_complete, "还没点「回到首页」就不算走完")
+        self.assertFalse(wizard.settings.wizard_complete, "还没点「重新开始」就不算走完")
 
-    def test_reread_goes_back_to_the_conversation_step(self):
-        """首页的「再读一次」必须真的回到选会话那一屏（范围确认也在那儿）——
-        以前页面调 back()，而首页不在步骤里，只会被拒。"""
+        outcome = wizard.advance()
+        self.assertTrue(outcome["ok"], outcome["reason"])
+        self.assertEqual(wizard.step, WizardStep.RESULTS)
+        # 就绪态保留：从分析详情「上一步」回来还能看这次的结论。
+
+    def test_advance_from_analyze_without_a_run_is_refused(self):
+        """没跑过整理就点「下一步」：不放行，并说清该按哪个按钮。"""
         wizard = _wizard(selected=True)
-        wizard.step = WizardStep.DONE
-        self.assertEqual(wizard.reread(), WizardStep.CONVERSATIONS)
-        self.assertEqual(wizard.step, WizardStep.CONVERSATIONS)
+        wizard.step = WizardStep.ANALYZE
+        outcome = wizard.advance()
+        self.assertFalse(outcome["ok"])
+        self.assertEqual(wizard.step, WizardStep.ANALYZE)
+        self.assertIn("开始 AI 整理", outcome["reason"])
+
 
     def test_steps_without_a_next_button_say_so(self):
         """智能整理要按「开始智能整理」——它没有「下一步」，不能假装有。"""
@@ -176,13 +183,6 @@ class BackTests(unittest.TestCase):
         outcome = wizard.back()
         self.assertFalse(outcome["ok"])
         self.assertEqual(wizard.step, WizardStep.LOGIN)
-
-    def test_back_from_home_says_it_cannot(self):
-        """首页（done）不在要走的步骤里，没有"上一步"可言。"""
-        wizard = _wizard()
-        wizard.step = WizardStep.DONE
-        self.assertFalse(wizard.back()["ok"])
-        self.assertEqual(wizard.step, WizardStep.DONE)
 
 
 class ResumeTests(unittest.TestCase):

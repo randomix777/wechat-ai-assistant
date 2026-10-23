@@ -34,6 +34,16 @@ import uuid
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from .utils import UNRESOLVED_TIMESTAMP
+
+#: 水位线比较键（SQL 版）。**不许直接拿 sent_at 字符串比**：占位串
+#: 「（时间未识别）」比任何日期字符串都大，会让占位行永远浮在水位线上方
+#: （每一轮增量都被当成"新消息"重发重计费），而它一旦被写进水位线，
+#: 真实日期又永远排不进去（那之后的新消息全被挡住）。占位行按
+#: observed_at（入库时间）参与排序 —— 它们是老导入的存量，
+#: 入库时间就是它们唯一可靠的顺序。
+WATERMARK_KEY_SQL = f"COALESCE(NULLIF(sent_at, '{UNRESOLVED_TIMESTAMP}'), observed_at)"
+
 #: 旧服务端单次任务的兼容上限。客户端会按会话拆成更小的请求批次。
 SUMMARY_MESSAGE_LIMIT = 200
 # Leave ample headroom in the published 1M context while keeping a whole
@@ -167,13 +177,18 @@ def messages_for_summary(app: Any, result: Any, role_id: str = "",
             marks = ",".join("?" for _ in import_ids)
             limit_clause = "" if full_history else " LIMIT " + str(int(SUMMARY_MESSAGE_LIMIT))
             rows = store.db.execute(
-                "SELECT group_id, sender, content, kind, media_json, COALESCE(sent_at, observed_at) AS sent_at, id, source_id"
+                "SELECT group_id, sender, content, kind, media_json, COALESCE(sent_at, observed_at) AS sent_at,"
+                " observed_at, id, source_id"
                 " FROM messages WHERE merchant_id=? AND import_id IN (" + marks + ")"
-                " ORDER BY group_id, COALESCE(sent_at_epoch, strftime('%s', observed_at)), observed_at, id"
+                # 排序键和水位线比较键必须是**同一个**（WATERMARK_KEY_SQL）：
+                # 以前排序用 epoch、比较用 sent_at 字符串，占位行两边不一致，
+                # 会“排序在最前、比较在最后”，水位线就写错了。
+                " ORDER BY group_id, " + WATERMARK_KEY_SQL + ", observed_at, id"
                 + limit_clause,
                 [tenant, *import_ids]).fetchall()
             messages = [{"group_id": str(row["group_id"] or ""),
                          "group_label": labels.get(str(row["group_id"] or ""), str(row["group_id"] or "")),
+                         "observed_at": str(row["observed_at"] or ""),
                          **_row_to_message(row)}
                         for row in rows]
             if role_id and not full_history:
@@ -190,7 +205,7 @@ def messages_for_summary(app: Any, result: Any, role_id: str = "",
                     last: dict[str, tuple[str, str]] = {}
                     for item in messages:
                         last[str(item.get("group_id") or "")] = (
-                            str(item.get("id") or ""), str(item.get("sent_at") or ""))
+                            str(item.get("id") or ""), _watermark_key(item))
                     for group, (mid, sent_at) in last.items():
                         if group and mid:
                             _set_watermark(store, tenant, group, role_id, mid, sent_at)
@@ -207,10 +222,11 @@ def messages_for_summary(app: Any, result: Any, role_id: str = "",
         if wm is not None:
             last_msg_id, last_sent_at = wm
             rows = store.db.execute(
-                "SELECT group_id, sender, content, kind, media_json, COALESCE(sent_at, observed_at) AS sent_at, id, source_id"
+                "SELECT group_id, sender, content, kind, media_json, COALESCE(sent_at, observed_at) AS sent_at,"
+                " observed_at, id, source_id"
                 " FROM messages WHERE merchant_id=? AND group_id=? AND "
-                "(COALESCE(sent_at, observed_at) > ? OR (COALESCE(sent_at, observed_at) = ? AND id > ?))"
-                " ORDER BY COALESCE(sent_at_epoch, strftime('%s', observed_at)), observed_at, id"
+                "(" + WATERMARK_KEY_SQL + " > ? OR (" + WATERMARK_KEY_SQL + " = ? AND id > ?))"
+                " ORDER BY " + WATERMARK_KEY_SQL + ", observed_at, id"
                 + limit_clause,
                 [tenant, group, last_sent_at, last_sent_at, last_msg_id]).fetchall()
         else:
@@ -218,17 +234,20 @@ def messages_for_summary(app: Any, result: Any, role_id: str = "",
             # 时间正序。以前这里是正序 + LIMIT，等于把**最旧**的 200 条喂给模型
             # —— 大群第一次跑活动助手，报告讲的是几个月前的事。
             rows = store.db.execute(
-                "SELECT group_id, sender, content, kind, media_json, COALESCE(sent_at, observed_at) AS sent_at, id, source_id"
+                "SELECT group_id, sender, content, kind, media_json, COALESCE(sent_at, observed_at) AS sent_at,"
+                " observed_at, id, source_id"
                 " FROM messages WHERE merchant_id=? AND group_id=? "
-                " ORDER BY COALESCE(sent_at_epoch, strftime('%s', observed_at)) DESC, observed_at DESC, id DESC"
+                " ORDER BY " + WATERMARK_KEY_SQL + " DESC, observed_at DESC, id DESC"
                 + limit_clause,
                 [tenant, group]).fetchall()
             rows = list(reversed(rows))
         for row in rows:
             messages.append({"group_id": str(row["group_id"] or ""),
                              "group_label": labels.get(str(row["group_id"] or ""), str(row["group_id"] or "")),
+                             "observed_at": str(row["observed_at"] or ""),
                              **_row_to_message(row)})
-            last_per_group[group] = (str(row["id"]), str(row["sent_at"]))
+            last_per_group[group] = (str(row["id"]), _watermark_key(
+                {"sent_at": str(row["sent_at"]), "observed_at": str(row["observed_at"] or "")}))
     # 直呼取数函数时维持原有行为；AI 任务延迟到成功后提交，失败可重试。
     if not defer_watermarks:
         for group, (msg_id, sent_at) in last_per_group.items():
@@ -557,18 +576,28 @@ def _after_watermarks(messages: list[dict[str, Any]],
         if wm is None:
             kept.append(item)
             continue
-        sent_at = str(item.get("sent_at") or "")
-        msg_id = str(item.get("id") or "")
-        if (sent_at, msg_id) > wm:
+        # 和 SQL 同一条规则：占位时间按 observed_at 参与比较（见 WATERMARK_KEY_SQL）。
+        if (_watermark_key(item), str(item.get("id") or "")) > wm:
             kept.append(item)
     return kept
 
 
+def _watermark_key(message: Mapping[str, Any]) -> str:
+    """水位线比较键（Python 版，和 :data:`WATERMARK_KEY_SQL` 同一规则）。"""
+    sent = str(message.get("sent_at") or "")
+    return sent if sent != UNRESOLVED_TIMESTAMP else str(message.get("observed_at") or "")
+
+
 def _get_watermark(store: Any, tenant: str, group_id: str, role_id: str) -> tuple[str, str] | None:
-    """返回 (last_msg_id, last_sent_at)；没有水位线返回 None。"""
+    """返回 (last_msg_id, last_sent_at)；没有水位线返回 None。
+
+    旧数据可能把占位串「（时间未识别）」写成了 ``last_sent_at``：落笔那一刻
+    该群已入库的消息**全都分析过了**。用"落笔时已入库消息里最大的比较键"
+    补一个等价水位线 —— 既不重算老消息（重复计费），也不挡之后的新消息。
+    """
     try:
         row = store.db.execute(
-            "SELECT last_msg_id, last_sent_at FROM analysis_watermarks"
+            "SELECT last_msg_id, last_sent_at, updated_at FROM analysis_watermarks"
             " WHERE merchant_id=? AND group_id=? AND role_id=?",
             [tenant, group_id, role_id]).fetchone()
     except Exception:
@@ -576,7 +605,25 @@ def _get_watermark(store: Any, tenant: str, group_id: str, role_id: str) -> tupl
         return None
     if row is None:
         return None
-    return str(row["last_msg_id"]), str(row["last_sent_at"])
+    last_sent_at = str(row["last_sent_at"] or "")
+    if last_sent_at == UNRESOLVED_TIMESTAMP:
+        try:
+            # 只取**真实时间**行的最大值：占位行的键是入库时间（T 格式），
+            # 字符串上比真实日期（空格格式）大，掺进 MAX 会把水位线压低，
+            # 下一轮就会把整个近期窗口重开一遍（重复计费）。
+            fixed = store.db.execute(
+                "SELECT MAX(sent_at) FROM messages"
+                " WHERE merchant_id=? AND group_id=? AND observed_at <= ?"
+                " AND COALESCE(sent_at,'') != '" + UNRESOLVED_TIMESTAMP + "'",
+                [tenant, group_id, str(row["updated_at"] or "")]).fetchone()
+        except Exception:
+            LOGGER.debug("normalize watermark failed", exc_info=True)
+            fixed = None
+        key = str(fixed[0]) if fixed and fixed[0] is not None else ""
+        if not key:
+            return None
+        return str(row["last_msg_id"]), key
+    return str(row["last_msg_id"]), last_sent_at
 
 
 def _set_watermark(store: Any, tenant: str, group_id: str, role_id: str,
@@ -1089,6 +1136,36 @@ def _is_vision_unsupported_error(exc: Exception) -> bool:
                 "unsupported image", "vision capability")))
 
 
+#: 明确回过「不吃 thinking 参数」的模型。进程内记住：一次失败之后，
+#: 后面的每一批都不再白花一次 400 往返。**不落盘** —— 换了网关或模型版本，
+#: 重启就会重新试一次，比把一次坏印象永久钉死更安全。
+_THINKING_UNSUPPORTED: set[str] = set()
+
+
+def _rejects_thinking(exc: Exception) -> bool:
+    """这个错误是不是"模型不接受某个请求参数"（400）。
+
+    网关对 ``jyi-default`` 回的是 ``unsupported_model_parameter``；个别通道
+    只把原话塞在 message 里，所以两边都认。
+    """
+    code = str(getattr(exc, "code", "") or "").casefold()
+    if code in {"unsupported_model_parameter", "unsupported_parameter",
+                "invalid_model_parameter"}:
+        return True
+    status = getattr(exc, "status", None) or getattr(exc, "status_code", None)
+    try:
+        status = int(status or 0)
+    except (TypeError, ValueError):
+        status = 0
+    if status != 400:
+        return False
+    text = f"{getattr(exc, 'message', '') or ''} " \
+           f"{getattr(exc, 'merchant_message', '') or ''}".casefold()
+    return any(term in text for term in
+               ("thinking", "reasoning_effort", "unsupported parameter",
+                "unknown parameter", "extra inputs"))
+
+
 def _jyi_model_limits(app: Any, model: str) -> tuple[int, int | None]:
     """Return a bounded output request and optional safe input-text budget."""
     from .jyi_parse import SUMMARY_MAX_OUTPUT_TOKENS
@@ -1163,8 +1240,14 @@ def _complete_summary_prompt(client: Any, model: str,
                              on_stream: Any = None,
                              is_cancelled: Any = None,
                              diagnostic_context: str = "",
-                             max_continuations: int = 2) -> str:
-    """Complete one bounded report, continuing once the model hits its output cap."""
+                             max_continuations: int = 2,
+                             on_reasoning: Any = None) -> str:
+    """Complete one bounded report, continuing once the model hits its output cap.
+
+    ``on_stream`` 收**正文**增量，``on_reasoning`` 收**推理过程**增量。两者必须分开：
+    推理是模型自己想的，正文才是给商户看的报告 —— 混在一起，商户会把思考过程
+    当成分析结论。模型常常先想几十秒再开口，那段时间界面上能有的只有推理。
+    """
     from .jyi_parse import (
         SUMMARY_MAX_OUTPUT_TOKENS, empty_text_detail, extract_text,
         output_was_truncated,
@@ -1177,10 +1260,23 @@ def _complete_summary_prompt(client: Any, model: str,
 
     if model == DEFAULT_TEXT_MODEL or model.rsplit("/", 1)[-1] in {
             "deepseek-flash", "deepseek-v4.1-flash"}:
-        # Default to direct answers. The user can still enable reasoning in
-        # explicit request options, but analysis should not wait on a long
-        # hidden-reasoning phase before producing its first visible token.
-        request_options.update(thinking={"type": "disabled"}, temperature=1.0)
+        # 有人在看推理（`on_reasoning` 接上了界面），就把推理打开：商户看到的是
+        # "模型正在逐字想"，而不是几十秒的空白。没人看时（脚本、测试、旧的无界面
+        # 调用）仍然直答 —— 推理 token 也计费，不该为看不见的东西付钱。
+        #
+        # 推理阶段更慢也更贵，这是**明知的选择**：不打开它，有时模型自己也会想
+        # 48 秒（实测），那段时间界面上什么都没有。
+        #
+        # **但不是每个模型都吃这个参数**：``jyi-default`` 直接回 400
+        # ``unsupported_model_parameter``（2026-10-22 实测），整个分析就失败了。
+        # 认识的模型集合在 ``_THINKING_UNSUPPORTED`` 里，碰到过一次就不再发。
+        request_options.update(
+            thinking={"type": "enabled" if on_reasoning else "disabled"},
+            temperature=1.0)
+        if model in _THINKING_UNSUPPORTED:
+            # 已经吃过一次 400：连 disabled 都不发（不知道它到底收不收这个键），
+            # 不传就是模型自己的默认行为。
+            request_options.pop("thinking", None)
     LOGGER.info(
         "AI completion request: context=%s model=%s max_tokens=%d "
         "thinking=%s reasoning_effort=%s temperature=%s",
@@ -1219,9 +1315,13 @@ def _complete_summary_prompt(client: Any, model: str,
             on_progress("AI 正在生成分析内容…")
             streamed_chars = 0
 
-    def progress_reasoning(_fragment_chars: int) -> None:
+    def progress_reasoning(fragment: str) -> None:
         nonlocal first_reasoning_logged, last_reasoning_progress
         _raise_if_cancelled(is_cancelled)
+        # 推理正文照原样往外送（界面拿它显示"模型正在想什么"）；
+        # 进度那句话另外按 8 秒一次吐，免得日志被刷屏。
+        if on_reasoning and fragment:
+            on_reasoning(fragment)
         if not on_progress:
             return
         now = time.monotonic()
@@ -1267,8 +1367,24 @@ def _complete_summary_prompt(client: Any, model: str,
                 diagnostic_kwargs["on_reasoning"] = progress_reasoning
         except (TypeError, ValueError):
             pass
-        body = complete(model, prompt_messages, **request_options,
-                        on_chunk=progress_delta, **diagnostic_kwargs)
+        try:
+            body = complete(model, prompt_messages, **request_options,
+                            on_chunk=progress_delta, **diagnostic_kwargs)
+        except Exception as exc:
+            if (str(request_options.get("thinking", {}).get("type")) != "enabled"
+                    or not _rejects_thinking(exc)):
+                raise
+            # 这个模型不吃推理开关：记住它，然后**不带这个参数**重试一次。
+            # 400 不产生费用，所以这次重试不额外花钱；不重试的话，商户看到的
+            # 是「所选分析模型暂不可用」—— 明明只是参数不合口味。
+            _THINKING_UNSUPPORTED.add(model)
+            request_options.pop("thinking", None)
+            LOGGER.info("分析模型 %s 不接受推理开关，改为不带该参数重试（context=%s）",
+                        model, diagnostic_context or "unspecified")
+            if on_progress:
+                on_progress("这个模型不支持推理模式，改为直接输出分析结果。")
+            body = complete(model, prompt_messages, **request_options,
+                            on_chunk=progress_delta, **diagnostic_kwargs)
     else:
         body = client.chat_completions(model, prompt_messages, **request_options)
     text = extract_text(body)
@@ -1348,7 +1464,8 @@ def _complete_jyi_chunk(client: Any, model: str, role_id: str,
                         on_stream: Any = None,
                         is_cancelled: Any = None,
                         include_images: bool = False,
-                        diagnostic_context: str = "") -> str:
+                        diagnostic_context: str = "",
+                        on_reasoning: Any = None) -> str:
     """Analyze a chunk, splitting it further only if the model hits its output cap."""
     from .jyi_parse import build_role_analysis_messages, build_summary_messages
 
@@ -1389,7 +1506,8 @@ def _complete_jyi_chunk(client: Any, model: str, role_id: str,
         return _complete_summary_prompt(client, model, prompt, max_output_tokens,
                                         on_progress, on_stream, is_cancelled,
                                         diagnostic_context=(
-                                            f"{context} split_depth={split_depth}"))
+                                            f"{context} split_depth={split_depth}"),
+                                        on_reasoning=on_reasoning)
     except ValueError as exc:
         reason = str(exc)
         hit_output_cap = "长度上限" in reason or "输出上限" in reason
@@ -1406,12 +1524,14 @@ def _complete_jyi_chunk(client: Any, model: str, role_id: str,
         first = _complete_jyi_chunk(client, model, role_id, chunk[:middle], on_progress,
                                     max_output_tokens, max_document_chars, split_depth + 1,
                                     on_stream, is_cancelled, include_images,
-                                    diagnostic_context + "/left")
+                                    diagnostic_context + "/left",
+                                    on_reasoning=on_reasoning)
         _raise_if_cancelled(is_cancelled)
         second = _complete_jyi_chunk(client, model, role_id, chunk[middle:], on_progress,
                                      max_output_tokens, max_document_chars, split_depth + 1,
                                      on_stream, is_cancelled, include_images,
-                                     diagnostic_context + "/right")
+                                     diagnostic_context + "/right",
+                                     on_reasoning=on_reasoning)
         return first + "\n\n" + second
 
 
@@ -1420,7 +1540,8 @@ def _reduce_summary_reports(client: Any, model: str, role_id: str, group: str,
                             max_output_tokens: int, on_progress: Any = None,
                             on_stream: Any = None,
                             is_cancelled: Any = None,
-                            force_refresh: bool = False) -> str:
+                            force_refresh: bool = False,
+                            on_reasoning: Any = None) -> str:
     """Merge analysis batches pairwise so document-heavy chats never make one huge reducer prompt."""
     from .jyi_parse import (
         build_order_report_merge_messages,
@@ -1477,7 +1598,7 @@ def _reduce_summary_reports(client: Any, model: str, role_id: str, group: str,
                     result = _complete_summary_prompt(
                         client, model, prompt, reduce_output_limit, on_progress,
                         on_stream, is_cancelled, diagnostic_context=diagnostic_context,
-                        max_continuations=0)
+                        max_continuations=0, on_reasoning=on_reasoning)
                     # 合并只该去重、缩短，不该写出比输入大几倍的东西。模型
                     # 偶尔会把两段观点"扩写"成一份很长的报告（真机上见过
                     # 8K 输入吐回 9K），算它超长，按下面那条路保留原分段。
@@ -1514,7 +1635,8 @@ def _run_summary_jyi(client: Any, messages: list[dict[str, Any]], role_id: str =
                      on_progress: Any = None,
                      on_stream: Any = None,
                      is_cancelled: Any = None,
-                     force_refresh: bool = False) -> dict[str, Any]:
+                     force_refresh: bool = False,
+                     on_reasoning: Any = None) -> dict[str, Any]:
     """JYI 直调摘要：提示词同样复用 `summary` 那一份，不另写。
 
     计费不在本地算（JYI 按账号计量），cost 恒为 None —— 别让界面
@@ -1635,12 +1757,14 @@ def _run_summary_jyi(client: Any, messages: list[dict[str, Any]], role_id: str =
                     try:
                         batch_stream = None
                         if on_stream:
-                            prefix = (f"【{group_labels[group]}】\n"
-                                      if show_group and group not in streamed_groups
-                                      else ("\n\n" if show_group else ""))
+                            # 直播区只进正文：群名可以当头（商户认得出是哪个群），
+                            # 批与批之间空一行就够。「第 x/n 批」由进度行说，
+                            # 不把【分段 i/n · 类别】这种工程口吻灌给商户。
+                            if show_group and group not in streamed_groups:
+                                prefix = f"【{group_labels[group]}】\n"
+                            else:
+                                prefix = "\n\n" if _chunk_index > 1 else ""
                             streamed_groups.add(group)
-                            if len(work_batches) > 1:
-                                prefix += f"【分段 {_chunk_index}/{len(work_batches)} · {category}】\n"
                             if prefix:
                                 on_stream(prefix)
                             batch_stream = on_stream
@@ -1649,7 +1773,8 @@ def _run_summary_jyi(client: Any, messages: list[dict[str, Any]], role_id: str =
                             max_output_tokens, max_document_chars,
                             on_stream=batch_stream, is_cancelled=is_cancelled,
                             include_images=send_images,
-                            diagnostic_context=diagnostic_context)
+                            diagnostic_context=diagnostic_context,
+                            on_reasoning=on_reasoning)
                         LOGGER.info(
                             "AI analysis batch completed: group=%s category=%s batch=%d/%d "
                             "model=%s elapsed_ms=%d report_chars=%d",
@@ -1699,7 +1824,8 @@ def _run_summary_jyi(client: Any, messages: list[dict[str, Any]], role_id: str =
                                             max_output_tokens, max_document_chars,
                                             on_stream=batch_stream, is_cancelled=is_cancelled,
                                             include_images=False,
-                                            diagnostic_context=diagnostic_context + "/text-fallback")
+                                            diagnostic_context=diagnostic_context + "/text-fallback",
+                                            on_reasoning=on_reasoning)
                                         text_cache_key = _summary_cache_key(
                                             "text-only-map-v5", model, role_id, group, text_chunk)
                                         cache[text_cache_key] = text_report
@@ -1734,13 +1860,12 @@ def _run_summary_jyi(client: Any, messages: list[dict[str, Any]], role_id: str =
                                 item["media_status"] = "已复用之前的图片分析结果，本次未重新上传"
                     if on_stream:
                         # 缓存命中以前是静默的：界面一直转圈，最后全文突然出现，
-                        # 看起来和"卡死后突然恢复"一模一样。回放出来。
-                        prefix = (f"【{group_labels[group]}】\n"
-                                  if show_group and group not in streamed_groups
-                                  else ("\n\n" if show_group else ""))
+                        # 看起来和"卡死后突然恢复"一模一样。回放出来（只进正文）。
+                        if show_group and group not in streamed_groups:
+                            prefix = f"【{group_labels[group]}】\n"
+                        else:
+                            prefix = "\n\n" if _chunk_index > 1 else ""
                         streamed_groups.add(group)
-                        if len(work_batches) > 1:
-                            prefix += f"【分段 {_chunk_index}/{len(work_batches)} · {category}】\n"
                         if prefix:
                             on_stream(prefix)
                         _emit_stream(on_stream, report)
@@ -1766,7 +1891,7 @@ def _run_summary_jyi(client: Any, messages: list[dict[str, Any]], role_id: str =
                         client, model, role_id, group, chunk_reports, cache, app,
                         max_output_tokens, on_progress=on_progress,
                         on_stream=None, is_cancelled=is_cancelled,
-                        force_refresh=force_refresh)
+                        force_refresh=force_refresh, on_reasoning=on_reasoning)
                 except AnalysisCancelled:
                     raise
                 except Exception as exc:
@@ -1780,10 +1905,9 @@ def _run_summary_jyi(client: Any, messages: list[dict[str, Any]], role_id: str =
                         for index, report in enumerate(chunk_reports, start=1))
                     if on_progress:
                         on_progress(f"{group_labels[group]}：分段合并失败，已保留原分段")
-                else:
-                    merge_header = (f"\n\n【{group_labels[group]}·合并分段】\n" if show_group
-                                    else "\n\n【合并分段】\n")
-                    _emit_stream(on_stream, f"{merge_header}{final_report}")
+                # 合并后的全文不回放进直播区：分批正文流完即止，最终报告在
+                # 结果屏看 —— 以前末尾砸一大块和分段重复的内容，"分段感"
+                # 就是这么来的。
             reports.append(f"【{group_labels[group]}】\n{final_report}" if show_group
                            else final_report)
             group_reports.append({
@@ -2029,9 +2153,6 @@ def _run_summary_gateway(app: Any, client: Any, messages: list[dict[str, Any]],
                 if error:
                     failures.append(f"{group_labels[group]}（合并分批结果）：{error}")
                     continue
-                merge_header = (f"\n\n【{group_labels[group]}·合并分段】\n" if show_group
-                                else "\n\n【合并分段】\n")
-                _emit_stream(on_stream, f"{merge_header}{final_report}")
             reports.append(f"【{group_labels[group]}】\n{final_report}" if show_group
                            else final_report)
             group_reports.append({
@@ -2070,7 +2191,8 @@ def run_summary(app: Any, result: Any, role_id: str = "",
                 on_stream: Any = None,
                 is_cancelled: Any = None,
                 incremental: bool | None = None,
-                force_refresh: bool = False) -> dict[str, Any]:
+                force_refresh: bool = False,
+                on_reasoning: Any = None) -> dict[str, Any]:
     """经云网关跑摘要。**在后台线程里跑，调用方不许碰界面。**
 
     LLM 只走云：这里不再读任何本地密钥。没登录返回"需要登录产品账号"。
@@ -2104,7 +2226,8 @@ def run_summary(app: Any, result: Any, role_id: str = "",
             settings = getattr(target, "settings", None)
             model_alias = str(getattr(settings, "model_alias", "") or "")
             outcome = _run_summary_jyi(client, messages, role_id, model_alias, target,
-                                        on_progress, on_stream, is_cancelled, force_refresh)
+                                        on_progress, on_stream, is_cancelled, force_refresh,
+                                        on_reasoning=on_reasoning)
         else:
             outcome = _run_summary_gateway(target, client, messages, role_id,
                                            on_progress, on_stream, is_cancelled,
@@ -2172,6 +2295,11 @@ def _gateway_error_text(exc: Exception, max_len: int = 60) -> str:
         return "当前模型不支持图片分析。请在模型设置中选择支持图片的模型后重试。"
     if "no published price" in lowered and "bill" in lowered:
         return "所选分析模型暂不可用，请更换模型或稍后重试。"
+    if code == "unsupported_model_parameter":
+        # 这条以前会掉进 merchant_safe_error 的"模型+计费"兜底，说成
+        # 「所选分析模型暂不可用」—— 其实是"这个模型不吃某项设置"。已经会自动
+        # 重试一次；真走到这里说明重试也没成，那才需要换模型。
+        return "当前模型不支持这项分析设置，请更换模型后重试。"
     if code in ("network_unavailable", "backend_unavailable"):
         return "网络暂不可用"
     if code == "too_many_concurrent":
@@ -2245,7 +2373,7 @@ def _advance_watermarks(app: Any, messages: Sequence[Mapping[str, Any]],
         message_id = str(item.get("id") or "")
         if not group or not message_id or (completed and group not in completed):
             continue
-        last_by_group[group] = (message_id, str(item.get("sent_at") or ""))
+        last_by_group[group] = (message_id, _watermark_key(item))
     for group, (message_id, sent_at) in last_by_group.items():
         _set_watermark(store, tenant, group, role_id, message_id, sent_at)
 

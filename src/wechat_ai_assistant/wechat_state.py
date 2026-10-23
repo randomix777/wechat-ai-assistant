@@ -205,8 +205,11 @@ STATE_COPY: dict[str, tuple[str, str, str]] = {
     ),
     WeChatState.UNREADABLE: (
         "暂时无法读取微信界面",
-        "先看一眼任务栏右下角：微信图标在的话点一下，把窗口打开，再点下面的「重新检测」。"
-        "如果微信明明开着还这样，把微信完全退出后重新打开一次，一般就好了。",
+        # 不许假设原因。曾经这里只讲"把窗口打开、退出重开"，而最常见的原因是
+        # **电脑忙了一下**（UIA 查询慢/超时），商户照着做一圈也没用。
+        # 先给最省事的一步（等一下再检测），再往上升级。
+        "电脑忙或微信还没响应时都会这样，不影响已经读到的消息。"
+        "等几秒再点「重新检测」；还不行，打开微信窗口再试；一直不行，把微信完全退出再打开。",
         "",
     ),
 }
@@ -237,11 +240,15 @@ class WeChatStatus:
 
         说明优先用这次检测的具体原因 —— 探针里对托盘、登录窗等情况都写了
         一步一步的指引，原来这里直接丢掉，一律显示通用文案，等于白写。
-        模拟状态与"尚未检测"仍用通用文案：前者只存在于测试里，后者表示
-        还没查过，不能编一条原因出来。
+        模拟状态仍用通用文案：那只存在于测试里。
+
+        **还没检测过**不能用"暂时无法读取微信界面"：一次都没查就宣布读不到，
+        等于开局先报一个假故障。那时候只说"正在检测"。
         """
         title, generic, button = STATE_COPY[self.state]
         detail = (self.detail or "").strip()
+        if not self.checked_at and detail in ("", "尚未检测"):
+            return ("正在检测微信状态…", "稍等一下。", "")
         if self.simulated or detail in ("", "尚未检测"):
             return title, generic, button
         return title, detail, button
@@ -281,6 +288,8 @@ class RealWeChatProbe:
     def __init__(self, clock: Callable[[], float] = time.time, timeout: float = 0.3):
         self._clock = clock
         self._timeout = timeout
+        #: 上一次查窗口是不是"查询本身出错/超时"（而不是"确实没有"）。
+        self._lookup_failed = False
 
     def probe(self) -> WeChatStatus:
         checked_at = self._clock()
@@ -333,19 +342,26 @@ class RealWeChatProbe:
 
         main = self._find_window(Desktop, MAIN_WINDOW_SPECS)
         if main is None:
-            # 进程在、主窗口不在 —— 十有八九是**商户把微信收进了任务栏托盘**。
-            # 这不是"出了故障"，也不该报成一句冷冰冰的"无法读取"：他一看
-            # 就知道自己没关微信，然后不知道下一步该做什么。
+            # 进程在、主窗口没找到。**两种原因要分开说**：
             #
-            # 实测：托盘里留着的是 Qt 的辅助窗口（类 Qt51514QWindowIcon，
-            # 标题 WeChat），主窗口 mmui::MainWindow 确实不在。确认不了登录
-            # 状态，所以这里只负责**说清楚现状和该做什么**。
-            # 注意：这只是"看不到状态"，不是"读不到消息" —— 读取走本机
-            # 数据库，不碰微信窗口。
+            # * 查询本身出错/超时（电脑忙、UIA 卡住）—— 这是"电脑卡了一下"，
+            #   不能跟商户说"窗口收起来了"，他会去翻窗口而问题在别处；
+            # * 查得到、只是不存在 —— 多半是收进了任务栏托盘（这是常态：
+            #   一边聊天一边跑本软件，没道理先把窗口摆出来）。
+            #
+            # 两种都只是"看不到登录状态"，**不是**"读不到消息" —— 读取走本机
+            # 数据库，不碰微信窗口。这句必须说，否则商户会去重读一遍。
+            if self._lookup_failed:
+                return WeChatStatus(
+                    WeChatState.UNREADABLE,
+                    "这次读微信窗口超时了，电脑忙时会这样，不影响已经读到的消息。"
+                    "等几秒再点「重新检测」。",
+                    checked_at=checked_at,
+                )
             return WeChatStatus(
                 WeChatState.UNREADABLE,
-                "微信开着，但窗口收起来了，看不到登录状态。"
-                "请点一下任务栏右下角的微信图标，把窗口打开，再回来点「重新检测」。",
+                "这次没看到微信窗口（可能收在任务栏右下角）。"
+                "点一下右下角的微信图标，再点「重新检测」。",
                 checked_at=checked_at,
             )
 
@@ -436,7 +452,12 @@ class RealWeChatProbe:
         查找失败**不能**被当成"窗口在"或"登录窗口在"：早前的写法把一次必然的
         ``AttributeError`` 吞掉后固定返回"等待扫码"，于是无论微信是什么状态，
         界面都显示请扫码 —— 一个永远不会自我纠正的假阳性。
+
+        "**查了没有**"和"**查询本身出错了**"要分得开（``self._lookup_failed``）：
+        电脑忙的时候 UIA 会超时抛错，那不是"商户把窗口收了"，照着"去点托盘图标"
+        做一圈也没用。调用方据此说不同的话。
         """
+        self._lookup_failed = False
         for spec in specs:
             try:
                 window = Desktop(backend="uia").window(**spec)
@@ -449,6 +470,7 @@ class RealWeChatProbe:
                 if window.exists(timeout=0.2, visible_only=False):
                     return window
             except Exception as exc:  # pragma: no cover - 取决于本机 UIA
+                self._lookup_failed = True
                 LOGGER.debug("window lookup failed for %s: %s", spec, exc)
         return None
 

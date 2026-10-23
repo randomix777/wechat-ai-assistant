@@ -513,13 +513,14 @@ class ReacquiredGuardsTests(unittest.TestCase):
         self.assertIn("一次最多 200 条", body)
 
     def test_the_role_report_survives_a_restart_in_the_interface(self):
-        """报告落盘之后**要有入口**：首页的按钮 + 放报告的容器 + 带上角色去取。
+        """报告落盘之后**要有入口**：结果屏的按钮 + 放报告的容器 + 带上角色去取。
 
-        只落盘不给入口 = 商户还是看不到，等于没存。
+        只落盘不给入口 = 商户还是看不到，等于没存。（跑完向导没有首页了：
+        结果屏看产物，「重新开始」回第一步。）
         """
-        done = self.page[self.page.index("  done(data)"):]
-        self.assertIn('data-action="role-report"', done, "首页要能点开报告")
-        self.assertIn('id="roleReport"', done, "点开了得有地方放")
+        results = self.page[self.page.index("  results(data)"):]
+        self.assertIn('action:"role-report"', results, "结果屏要能点开报告")
+        self.assertIn('id="roleReport"', results, "点开了得有地方放")
         self.assertIn("/api/analysis/report?role=", self.page, "取报告要指明是哪个角色的")
 
     def test_a_multi_conversation_report_is_split_per_conversation(self):
@@ -598,6 +599,40 @@ class ReacquiredGuardsTests(unittest.TestCase):
         """渲染出错也要说出来：冻在「正在加载…」上，商户只会觉得软件坏了。"""
         self.assertIn("console.error(err)", self.page)
         self.assertIn("这一屏没能画出来", self.page)
+
+    def test_the_analysis_screen_splits_the_stream_from_the_categories(self):
+        """分析中那一屏：左边流式正文，右边这次要盯的类别。
+
+        反转记录：模型出第一个字之前可能等 48 秒（实测最长的一个会话），
+        屏幕上只有一个「等待 AI 首段内容…」的空框 —— 商户只会以为卡死了。
+        所以左栏要有进度（正在分析第几个会话），右栏要按角色给的类别
+        把已经写出来的内容归位。
+        """
+        self.assertIn("analysis-split", self.page, "分析中要左右两栏")
+        self.assertIn("需要关注的类别", self.page)
+        self.assertIn("analysis_progress", self.page, "进度要来自服务端，不是页面自己编")
+        self.assertIn("模型还在读这一批", self.page, "还没出字时也要有话说")
+        self.assertIn("推理过程", self.page, "推理过程要单独显示出来")
+        self.assertIn("不是分析结论", self.page, "推理不是结论，这句必须标清楚")
+        self.assertIn("reasoning_stream", self.page)
+        self.assertIn("splitByHeadings", self.page, "按报告标题切出类别")
+        self.assertIn("currentSections", self.page, "类别来自服务端给的 sections")
+
+    def test_when_the_service_is_gone_it_says_what_to_do(self):
+        """服务真没了，页面不能永远只喊「正在重试」。
+
+        反转记录：重启客户端时旧窗口留在了停掉的端口上，徽标一秒一次地
+        「连接中断，正在重试…」，而商户唯一能做的（关掉窗口重开）没有任何提示。
+        短时断连仍先自己重试 —— 重启那几秒不值得吓人。
+        """
+        body = self.page[self.page.index("function setConnectionStatus"):
+                         self.page.index("async function post(")]
+        self.assertIn("连接中断，正在重试", body, "短时断连先自己重试")
+        self.assertIn("连不上本机服务", body, "久连不上要直说连不上")
+        self.assertIn("关掉窗口重开", body, "还要给一条出路")
+        self.assertIn("connFailedSince", body, "按「从什么时候开始断」判断久不久")
+        self.assertIn("CONN_GIVE_UP_MS", body)
+        self.assertIn("不用重新读取", body, "重开之后不用重读，这句要说")
 
 
 if __name__ == "__main__":

@@ -183,7 +183,8 @@ class PageEntryTests(unittest.TestCase):
             encoding="utf-8")
 
     def test_export_button_exists_and_checks_first(self):
-        self.assertIn('data-action="export"', self.page)
+        # 导出在底栏动作表里（结果页和首页共用同一套位置）。
+        self.assertIn('action:"export"', self.page)
         self.assertIn("/api/export/check", self.page)
         self.assertIn("/api/export/bundle", self.page)
 

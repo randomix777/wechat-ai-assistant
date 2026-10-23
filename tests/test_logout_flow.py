@@ -98,12 +98,12 @@ class DetachTests(unittest.TestCase):
         """退出登录必须回到登录前置页（真实报障）。
 
         门禁判据是登录态，而退出是**唯一一次**让它由真变假的操作。以前只清
-        session/client/pipeline、不动 ``wizard.step``：停在首页或核对页点退出，
+        session/client/pipeline、不动 ``wizard.step``：停在结果页或核对页点退出，
         页面纹丝不动 —— 顶栏写着「未登录」，正文还是商户的经营数据。
         """
         from wechat_ai_assistant.wizard import WizardStep
 
-        self.app.wizard.step = WizardStep.DONE
+        self.app.wizard.step = WizardStep.RESULTS
         self.app.detach()
         self.assertEqual(self.app.wizard.step, WizardStep.LOGIN,
                          "退出登录要回登录页，不能留在原来的流程里")

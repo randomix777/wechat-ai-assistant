@@ -98,9 +98,7 @@ class AvatarRoutingTests(unittest.TestCase):
         reader = HistoryReader(
             dump, group_members=lambda conv: ["张老板"], sender_source="members",
         )
-        with patch("wechat_ai_assistant.WeChatAuto.Messages.dump_senders_via_avatar") as avatar:
-            got = reader._read_one(_group(), 50)
-        self.assertEqual(avatar.call_count, 0)
+        got = reader._read_one(_group(), 50)
         self.assertEqual(len(dump.calls), 1)
         self.assertEqual(dump.calls[0]["groupMembers"], ["张老板"])
         self.assertEqual(got, rows)
@@ -118,75 +116,3 @@ class AvatarRoutingTests(unittest.TestCase):
         self.assertEqual(got, sentinel)
         self.assertEqual(dump.calls, [], "注入的 members 路不该再跑")
 
-
-class AvatarCardCopyTests(unittest.TestCase):
-    """右键复制兜底：卡片文本树为空时，从剪贴板拿。纯假对象，不碰界面。"""
-
-    class FakeCopyItem:
-        def __init__(self, exists=True):
-            self._exists = exists
-            self.clicked = False
-
-        def exists(self, timeout=None):
-            return self._exists
-
-        def click_input(self):
-            self.clicked = True
-
-    class FakeProfile:
-        def __init__(self, exists=True):
-            self.copy_item = AvatarCardCopyTests.FakeCopyItem(exists)
-            self.right_clicked = False
-
-        def right_click_input(self):
-            self.right_clicked = True
-
-        def child_window(self, **kwargs):
-            return self.copy_item
-
-    def _clipboard(self, reads):
-        import wechat_ai_assistant.utils as utils_mod
-
-        writes = []
-        return (
-            patch.object(utils_mod.SystemSettings, "get_copied_text", side_effect=list(reads)),
-            patch.object(utils_mod.SystemSettings, "copy_text_to_clipboard",
-                         side_effect=lambda text: writes.append(text)),
-            writes,
-        )
-
-    def test_copy_success_returns_text_and_restores_clipboard(self):
-        import wechat_ai_assistant.utils as utils_mod
-
-        profile = self.FakeProfile()
-        get_patch, set_patch, writes = self._clipboard(["旧剪贴板", "张老板\n微信号：wxid_1"])
-        with get_patch, set_patch:
-            got = utils_mod._copy_avatar_card_text(profile)
-        self.assertTrue(profile.right_clicked)
-        self.assertTrue(profile.copy_item.clicked)
-        self.assertIn("张老板", got)
-        self.assertEqual(writes[-1], "旧剪贴板")
-
-    def test_no_copy_menu_raises(self):
-        import wechat_ai_assistant.utils as utils_mod
-
-        profile = self.FakeProfile(exists=False)
-        get_patch, set_patch, writes = self._clipboard(["旧剪贴板"])
-        with get_patch, set_patch:
-            with self.assertRaises(ValueError):
-                utils_mod._copy_avatar_card_text(profile)
-        self.assertEqual(writes[-1], "旧剪贴板")
-
-    def test_empty_clipboard_after_copy_raises(self):
-        import wechat_ai_assistant.utils as utils_mod
-
-        profile = self.FakeProfile()
-        get_patch, set_patch, writes = self._clipboard(["旧剪贴板", "   "])
-        with get_patch, set_patch:
-            with self.assertRaises(ValueError):
-                utils_mod._copy_avatar_card_text(profile)
-        self.assertEqual(writes[-1], "旧剪贴板")
-
-
-if __name__ == "__main__":
-    unittest.main()
