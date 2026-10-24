@@ -1,6 +1,6 @@
 # 发版流程：出包 → 传 JYI 工具中心 → 客户端静默更新
 
-客户端的自动更新**先问 JYI 工具中心**（`https://jyisolutions.com/api/tools/wechat-ai-assistant`，
+客户端的自动更新**先问 JYI 工具中心**（`https://jyisolutions.com/api/tools/wx-ai-assistant`，
 见 `src/wechat_ai_assistant/updater.py` 的 `_check_jyi`），问不到才回落到 GitHub Releases。
 两条路下到的包都要过同一套签名校验，所以换下载入口不等于放宽信任。
 

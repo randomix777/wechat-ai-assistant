@@ -68,7 +68,7 @@ API_LATEST = "https://api.github.com/repos/{repo}/releases/latest"
 #: 国内拉 GitHub 的 70MB 又慢又被匿名限流。设成空串就只用 GitHub。
 JYI_TOOLS_BASE = "https://jyisolutions.com"
 #: 工具中心里这个工具的 slug（``<base>/api/tools/<slug>``）。
-JYI_TOOL_SLUG = "wechat-ai-assistant"
+JYI_TOOL_SLUG = "wx-ai-assistant"
 #: 自建服务器/测试用：覆盖工具中心地址与工具名。空串 = 关掉这条路。
 TOOLS_BASE_ENV = "WECHAT_AI_TOOLS_BASE"
 TOOL_SLUG_ENV = "WECHAT_AI_TOOL_SLUG"
