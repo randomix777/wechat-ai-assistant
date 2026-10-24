@@ -1,6 +1,6 @@
 [project]
 name="wechat-ai-assistant"
-version="1.11.17"
+version="1.11.18"
 description="Windows WeChat automation and AI merchant assistant"
 readme="README.md"
 license={text="LGPL"}

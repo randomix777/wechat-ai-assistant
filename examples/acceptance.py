@@ -264,7 +264,7 @@ def main(argv: list[str] | None = None) -> int:
         checks.append(check_doc_facts)
 
     print("=" * 74)
-    print("微信AI智能助理 · 验收")
+    print("威信AI智能助理 · 验收")
     print(f"仓库：{ROOT}")
     print(f"解释器：{PYTHON}")
     print("=" * 74)

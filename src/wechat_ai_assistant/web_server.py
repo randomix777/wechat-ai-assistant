@@ -713,7 +713,7 @@ class WebHandler(BaseHTTPRequestHandler):
         LOGGER.exception("处理请求时出错：%s", self.path)
         html = (
             "<!DOCTYPE html><html lang='zh-CN'><meta charset='utf-8'>"
-            "<title>微信AI智能助理</title>"
+            "<title>威信AI智能助理</title>"
             "<body style=\"font:14px/1.7 'Microsoft YaHei',system-ui;padding:32px;max-width:760px;"
             "margin:0 auto;color:#1b2430\">"
             "<h2 style='color:#b4232c'>界面这一屏没能加载出来</h2>"

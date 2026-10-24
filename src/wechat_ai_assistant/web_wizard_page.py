@@ -28,7 +28,7 @@ PAGE = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>微信AI智能助理 __VERSION__</title>
+<title>威信AI智能助理 __VERSION__</title>
 <style>
   :root {
     --ink:#182230; --muted:#657487; --line:#e2e8ee; --bg:#f4f7f9; --card:#fff;
@@ -359,7 +359,7 @@ PAGE = r"""<!DOCTYPE html>
       <path d="M5 6.75A3.75 3.75 0 0 1 8.75 3h7.5A3.75 3.75 0 0 1 20 6.75v4.5A3.75 3.75 0 0 1 16.25 15H12l-4.5 3v-3.17A3.75 3.75 0 0 1 5 11.25v-4.5Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
       <path d="M9 8.8h.01M15 8.8h.01M9 11.5h6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
     </svg></span>
-    <span><h1>微信AI智能助理</h1></span>
+    <span><h1>威信AI智能助理</h1></span>
   </div>
   <span class="badge" id="ver"></span>
   <span class="badge" id="acct">未登录</span>

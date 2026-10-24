@@ -121,8 +121,8 @@ class PageAndStateTests(unittest.TestCase):
         status, body = self.client.get("/")
         html = body.decode("utf-8")
         self.assertEqual(status, 200)
-        # 品牌名跟着桌面端叫「微信AI智能助理」（以前叫接单助手，改名时测试没跟上）。
-        self.assertIn("微信AI智能助理", html)
+        # 品牌名跟着桌面端叫「威信AI智能助理」（以前叫接单助手，改名时测试没跟上）。
+        self.assertIn("威信AI智能助理", html)
         for term in ("读取历史", "智能整理", "商品与客户名单", "订单", "运行日志"):
             self.assertIn(term, html, f"\u9875\u9762\u91cc\u6ca1\u6709\u300c{term}\u300d")
         # 老路「整理成一段话」收了：商户只有「选角色 → 开始分析」这一条路，
@@ -232,7 +232,7 @@ class PageAndStateTests(unittest.TestCase):
 
         _, body = self.client.get("/wizard")
         html = body.decode("utf-8")
-        self.assertIn(f"<title>微信AI智能助理 {__version__}</title>", html)
+        self.assertIn(f"<title>威信AI智能助理 {__version__}</title>", html)
         self.assertNotIn("__VERSION__", html, "占位符没被替换")
         self.assertIn(__version__, web_window.app_title())
 
@@ -687,7 +687,7 @@ class MerchantWizardPageTests(unittest.TestCase):
         status, body = self.client.get("/wizard")
         html = body.decode("utf-8")
         self.assertEqual(status, 200)
-        self.assertIn("微信AI智能助理", html)
+        self.assertIn("威信AI智能助理", html)
         self.assertIn("/api/state", html, "页面必须靠状态接口拿数据")
 
     def test_the_page_does_not_carry_step_facts(self):

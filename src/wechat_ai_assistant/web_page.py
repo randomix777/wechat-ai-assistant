@@ -18,7 +18,7 @@ PAGE = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>微信AI智能助理 __VERSION__ · 开发调试</title>
+<title>威信AI智能助理 __VERSION__ · 开发调试</title>
 <style>
   :root {
     --ink: #1b2430; --muted: #667486; --line: #dfe4ea; --bg: #f5f7f9;
@@ -68,7 +68,7 @@ PAGE = r"""<!DOCTYPE html>
 </head>
 <body>
 <header>
-  <h1>微信AI智能助理 · 开发调试</h1>
+  <h1>威信AI智能助理 · 开发调试</h1>
   <nav>
     <a href="#s-acct">账号</a><a href="#s-wechat">微信</a><a href="#s-conv">会话</a><a href="#s-read">读取</a><a href="#s-analyze">整理</a><a href="#s-orders">订单</a><a href="#s-logs">日志</a>
   </nav>

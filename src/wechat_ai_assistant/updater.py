@@ -30,7 +30,7 @@ Windows 下运行中的 exe 和 DLL 全被锁死，原地覆盖必失败。
 ## 约定（发版的人必须遵守，见 docs/release.md）
 
 * 版本号就是 Git tag 去掉开头的 ``v``，和 :mod:`wechat_ai_assistant.version` 一致；
-* 安装包叫 ``微信AI智能助理-win64-<版本>.zip``，内容是整个 onedir 目录；
+* 安装包叫 ``wechat-ai-assistant-win64-<版本>.zip``，内容是整个 onedir 目录；
 * 安装包上传到 **JYI 工具中心**（``docs/release.md`` 的「上传」一节）；老客户端只认
   GitHub 上同名加 ``.sha256`` 的十六进制哈希，所以过渡期两个都要有；
 * 每个版本还要在工具中心填上**签名清单 + 签名**（``deploy/sign_release.py``
@@ -73,8 +73,8 @@ JYI_TOOL_SLUG = "wechat-ai-assistant"
 TOOLS_BASE_ENV = "WECHAT_AI_TOOLS_BASE"
 TOOL_SLUG_ENV = "WECHAT_AI_TOOL_SLUG"
 
-#: 安装包名前缀。完整文件名形如 ``微信AI智能助理-win64-1.9.9.zip``。
-ASSET_PREFIX = "微信AI智能助理-win64-"
+#: 安装包名前缀。完整文件名形如 ``wechat-ai-assistant-win64-1.9.9.zip``。
+ASSET_PREFIX = "wechat-ai-assistant-win64-"
 PENDING_NAME = "pending.json"
 UPDATES_DIR_NAME = "_updates"
 BACKUP_PREFIX = "_backup-"

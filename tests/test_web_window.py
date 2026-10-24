@@ -267,8 +267,8 @@ class InstanceGuardTests(unittest.TestCase):
     def test_it_finds_another_copy_and_says_where_it_is(self):
         from wechat_ai_assistant import instance_guard
 
-        fake = type("P", (), {"info": {"pid": 4242, "name": "微信AI智能助理.exe",
-                                    "exe": r"D:\\旧目录\\微信AI智能助理.exe",
+        fake = type("P", (), {"info": {"pid": 4242, "name": "威信AI智能助理.exe",
+                                    "exe": r"D:\\旧目录\\威信AI智能助理.exe",
                                     "create_time": 0.0}})()
         with mock.patch.object(instance_guard, "_self_tree", return_value={os.getpid()}), \
                 mock.patch.object(instance_guard, "_is_our_process", return_value=True), \

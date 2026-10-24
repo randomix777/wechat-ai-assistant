@@ -35,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
                               default_device_name)
 
     parser = argparse.ArgumentParser(prog="wechat-ai-assistant-web",
-                                     description="微信AI智能助理（Web 界面）")
+                                     description="威信AI智能助理（Web 界面）")
     parser.add_argument("--port", type=int, default=0,
                         help="本机端口，0 = 让系统挑一个空闲的")
     parser.add_argument("--data-dir", default="", help=argparse.SUPPRESS)

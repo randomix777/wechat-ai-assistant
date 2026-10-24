@@ -46,7 +46,7 @@
 .\.venv\Scripts\python.exe  src\wechat_ai_assistant\launcher.py          # 带控制台，看日志用
 ```
 
-发布包的启动脚本是 `deploy\启动微信AI智能助理.bat`（**必须 CRLF**，见 `docs/release.md`）。
+发布包的启动脚本是 `deploy\启动威信AI智能助理.bat`（**必须 CRLF**，见 `docs/release.md`）。
 
 **所有 `.bat` 都必须 CRLF**（不只 deploy 里那几个）：cmd 按字节读批处理，LF-only 的
 UTF-8 文件遇到中文注释会读错行，把注释当命令执行 —— 屏幕上是一串

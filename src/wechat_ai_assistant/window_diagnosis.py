@@ -159,7 +159,7 @@ def collect(url: str = "", data_dir: Path | None = None) -> str:
 
     data_dir = Path(data_dir) if data_dir else Path(tempfile.gettempdir())
     parts: list[str] = [
-        "微信AI智能助理 诊断报告",
+        "威信AI智能助理 诊断报告",
         f"生成时间: {time.strftime('%Y-%m-%d %H:%M:%S')}",
         "",
         _section("程序"),

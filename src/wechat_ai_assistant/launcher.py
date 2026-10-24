@@ -102,13 +102,13 @@ def _show_update_splash(version: str) -> None:
             set_window_icon(root)
         except Exception:
             pass
-        root.title("微信AI智能助理 - 正在更新")
+        root.title("威信AI智能助理 - 正在更新")
         root.resizable(False, False)
         root.configure(background=CARD_BG)
         root.attributes("-topmost", True)
         bar = tk.Frame(root, background=BRAND, height=6)
         bar.pack(fill="x")
-        title = tk.Label(root, text="微信AI智能助理", font=(FONT, 12, "bold"),
+        title = tk.Label(root, text="威信AI智能助理", font=(FONT, 12, "bold"),
                          background=CARD_BG, foreground=BRAND)
         title.pack(pady=(16, 2))
         label = f"正在更新到 v{version or '新版本'}，完成后自动打开，请稍候…\n请不要重复双击。"
@@ -182,7 +182,7 @@ def _show_error_dialog(title: str, detail: str) -> None:
         MB_TOPMOST = 0x00040000
         MB_SETFOREGROUND = 0x00010000
         ctypes.windll.user32.MessageBoxW(
-            None, str(detail or "").strip(), str(title or "微信AI智能助理"),
+            None, str(detail or "").strip(), str(title or "威信AI智能助理"),
             MB_ICONERROR | MB_TOPMOST | MB_SETFOREGROUND,
         )
     except Exception:

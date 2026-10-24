@@ -3,7 +3,7 @@
 
     python deploy/build_windows.py
 
-产物：dist/微信AI智能助理/（onedir）或 dist/微信AI智能助理.exe（onefile）。
+产物：dist/威信AI智能助理/（onedir）或 dist/威信AI智能助理.exe（onefile）。
 
 **onedir 是默认选择**：微信自动化依赖 pywinauto/pywin32 的原生 DLL 和
 隐藏导入，onefile 每次启动都要把它们解包到临时目录，启动慢且更容易被杀软
@@ -111,11 +111,11 @@ VERSION_FILE.write_text(
   kids=[
     StringFileInfo([StringTable('080404b0', [
       StringStruct('CompanyName', 'JYI'),
-      StringStruct('FileDescription', '微信AI智能助理'),
+      StringStruct('FileDescription', '威信AI智能助理'),
       StringStruct('FileVersion', '{__version__}'),
       StringStruct('InternalName', 'wechat-ai-assistant'),
-      StringStruct('OriginalFilename', '微信AI智能助理.exe'),
-      StringStruct('ProductName', '微信AI智能助理'),
+      StringStruct('OriginalFilename', '威信AI智能助理.exe'),
+      StringStruct('ProductName', '威信AI智能助理'),
       StringStruct('ProductVersion', '{__version__}')])]),
     VarFileInfo([VarStruct('Translation', [2052, 1200])])
   ]
@@ -147,7 +147,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="微信AI智能助理",
+    name="威信AI智能助理",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -174,5 +174,5 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="微信AI智能助理",
+    name="威信AI智能助理",
 )

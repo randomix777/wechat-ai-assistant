@@ -86,7 +86,7 @@ def other_instances() -> list[dict[str, Any]]:
 
 def describe(instances: list[dict[str, Any]]) -> str:
     """给商户看的说明：**把对方的路径写出来**，他才知道该关哪一个。"""
-    lines = ["已经有一个「微信AI智能助理」在运行了：", ""]
+    lines = ["已经有一个「威信AI智能助理」在运行了：", ""]
     seen: set[str] = set()
     for item in instances:
         exe = item.get("exe") or "（路径未知）"
@@ -96,7 +96,7 @@ def describe(instances: list[dict[str, Any]]) -> str:
         lines.append(f"　· {exe}")
     lines += [
         "",
-        "请先把那个窗口关掉（任务管理器里结束「微信AI智能助理」也行），再打开这一份。",
+        "请先把那个窗口关掉（任务管理器里结束「威信AI智能助理」也行），再打开这一份。",
         "两个同时开着会抢同一个微信窗口和同一份订单库，也容易搞不清在用的是哪一版。",
     ]
     return "\n".join(lines)

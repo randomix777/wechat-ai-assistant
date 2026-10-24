@@ -58,7 +58,7 @@ def _fake_app_zip(top_dir=True):
     buf = io.BytesIO()
     prefix = "appdir/" if top_dir else ""
     with zipfile.ZipFile(buf, "w") as archive:
-        archive.writestr(prefix + "微信AI智能助理.exe", b"EXE")
+        archive.writestr(prefix + "威信AI智能助理.exe", b"EXE")
         archive.writestr(prefix + "_internal/a.pyd", b"BIN")
     return buf.getvalue()
 
@@ -176,7 +176,7 @@ class SignedReleaseTests(unittest.TestCase):
         self.assertEqual(info["notes"], "签名版说明")
         # release 里那个官方附件只是备用下载入口
         self.assertEqual(len(info["alt_urls"]), 1)
-        self.assertTrue(info["alt_urls"][0].endswith("微信AI智能助理-win64-1.10.0.zip"))
+        self.assertTrue(info["alt_urls"][0].endswith("wechat-ai-assistant-win64-1.10.0.zip"))
 
     def test_an_empty_manifest_notes_falls_back_to_the_release_body(self):
         release, blobs = self._signed_release(notes="")
@@ -439,7 +439,7 @@ class StageTests(unittest.TestCase):
         try:
             self.assertIsNotNone(staged)
             assert staged is not None
-            self.assertTrue((staged / "微信AI智能助理.exe").is_file())
+            self.assertTrue((staged / "威信AI智能助理.exe").is_file())
             pending = json.loads((base / updater.PENDING_NAME).read_text(encoding="utf-8"))
             self.assertEqual(pending["version"], "1.9.9")
         finally:
@@ -500,7 +500,7 @@ class StageTests(unittest.TestCase):
         data = _fake_app_zip()
         digest = hashlib.sha256(data).hexdigest()
         base = Path(tempfile.mkdtemp(prefix="pyw-upd-"))
-        alt = "https://example.com/微信AI智能助理-win64-1.9.9.zip"
+        alt = "https://example.com/wechat-ai-assistant-win64-1.9.9.zip"
         info = {"version": "1.9.9", "notes": "", "sha256": digest,
                 "zip_url": "https://cdn.example.com/dead.zip", "alt_urls": [alt]}
         calls = []
@@ -549,10 +549,10 @@ class ScriptTests(unittest.TestCase):
         base = Path(tempfile.mkdtemp(prefix="pyw-upd-"))
         try:
             info = {"version": "1.9.9", "dir": "1.9.9", "notes": ""}
-            script = updater.build_updater_script(base, info, "微信AI智能助理.exe", 1234)
+            script = updater.build_updater_script(base, info, "威信AI智能助理.exe", 1234)
             text = script.read_text(encoding="utf-8")
             self.assertIn("1234", text)
-            self.assertIn("微信AI智能助理.exe", text)
+            self.assertIn("威信AI智能助理.exe", text)
             # 等旧进程 → 搬目录 → 起新版 → 15 秒观测 → 起不来回滚 → 自删
             for needle in ("tasklist", "rmdir", "move", "-n 16 127.0.0.1", 'del "%~f0"'):
                 self.assertIn(needle, text, needle)
@@ -598,9 +598,9 @@ class ScriptExecutionTests(unittest.TestCase):
         return source
 
     def _layout(self, version: str) -> tuple[Path, Path]:
-        base = Path(tempfile.mkdtemp(prefix="pyw-swap-")) / "微信AI智能助理"
+        base = Path(tempfile.mkdtemp(prefix="pyw-swap-")) / "威信AI智能助理"
         (base / "_internal").mkdir(parents=True)
-        (base / "微信AI智能助理.exe").write_bytes(b"OLD")
+        (base / "威信AI智能助理.exe").write_bytes(b"OLD")
         (base / "data").mkdir()
         (base / "data" / "shop.json").write_text('{"旧": 1}', encoding="utf-8")
         # 启动时读到的"待换版"标记（真流程里由 download_and_stage 写）。脚本必须把它
@@ -621,7 +621,7 @@ class ScriptExecutionTests(unittest.TestCase):
         self._log_path(version).unlink(missing_ok=True)
         return updater.build_updater_script(
             base, {"version": version, "dir": version, "notes": ""},
-            "微信AI智能助理.exe", gone.pid, settle_seconds=2)
+            "威信AI智能助理.exe", gone.pid, settle_seconds=2)
 
     def _log_path(self, version: str) -> Path:
         log = Path(tempfile.gettempdir()) / f"pyw-apply-{version}.log"
@@ -645,10 +645,10 @@ class ScriptExecutionTests(unittest.TestCase):
         version = "1.99.1"
         base, staged = self._layout(version)
         self.addCleanup(shutil.rmtree, base.parent, ignore_errors=True)
-        shutil.copy2(self._system_ping(), staged / "微信AI智能助理.exe")
+        shutil.copy2(self._system_ping(), staged / "威信AI智能助理.exe")
         # 新版起来后是常驻的：这里先替它把进程起上（脚本自己那次 start 不带参数会
         # 立刻退出），让它"活着"，于是走成功分支。
-        alive = subprocess.Popen([str(staged / "微信AI智能助理.exe"), "-t", "127.0.0.1"])
+        alive = subprocess.Popen([str(staged / "威信AI智能助理.exe"), "-t", "127.0.0.1"])
         self.addCleanup(alive.kill)
         try:
             time.sleep(0.5)
@@ -667,7 +667,7 @@ class ScriptExecutionTests(unittest.TestCase):
             self.assertFalse((base / updater.PENDING_NAME).exists(),
                              "换完了就要把待换版标记收掉，不然重启时会再换一遍")
         finally:
-            subprocess.run(["taskkill", "/F", "/IM", "微信AI智能助理.exe"],
+            subprocess.run(["taskkill", "/F", "/IM", "威信AI智能助理.exe"],
                            capture_output=True)
 
     def test_a_new_version_that_dies_is_rolled_back(self):
@@ -675,11 +675,11 @@ class ScriptExecutionTests(unittest.TestCase):
         base, staged = self._layout(version)
         self.addCleanup(shutil.rmtree, base.parent, ignore_errors=True)
         # ping 不带参数会打印用法后立刻退出 —— 正是"新版起不来"
-        shutil.copy2(self._system_ping(), staged / "微信AI智能助理.exe")
+        shutil.copy2(self._system_ping(), staged / "威信AI智能助理.exe")
         self._run(self._generate(base, version))
 
         self.assertFalse((base / "新版标记.txt").exists(), "新版起不来就该被换掉")
-        self.assertEqual((base / "微信AI智能助理.exe").read_bytes(), b"OLD",
+        self.assertEqual((base / "威信AI智能助理.exe").read_bytes(), b"OLD",
                          "旧版主程序应该回来了")
         self.assertEqual((base / "data" / "shop.json").read_text(encoding="utf-8"),
                          '{"旧": 1}', "回滚也不能丢便携数据")
@@ -774,11 +774,11 @@ class ApplyTests(unittest.TestCase):
         try:
             staged = base / updater.UPDATES_DIR_NAME / "1.9.9"
             staged.mkdir(parents=True)
-            (staged / "微信AI智能助理.exe").write_bytes(b"EXE")
+            (staged / "威信AI智能助理.exe").write_bytes(b"EXE")
             (staged / "_internal").mkdir()
             (base / updater.PENDING_NAME).write_text(
                 json.dumps({"version": "1.9.9", "dir": "1.9.9"}), encoding="utf-8")
-            (base / "微信AI智能助理.exe").write_bytes(b"OLD")
+            (base / "威信AI智能助理.exe").write_bytes(b"OLD")
             spawned = []
             with unittest.mock.patch.object(updater.sys, "frozen", True, create=True), \
                 unittest.mock.patch("subprocess.Popen",

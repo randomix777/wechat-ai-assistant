@@ -89,7 +89,7 @@ def filename(rows: list[dict[str, Any]], *, ext: str = "zip") -> str:
     else:
         scope = "会话"
     stamp = time.strftime("%Y%m%d_%H%M")
-    return f"微信AI智能助理-{scope}-{len(rows or [])}条-{stamp}.{ext}"
+    return f"威信AI智能助理-{scope}-{len(rows or [])}条-{stamp}.{ext}"
 
 
 def build(app: Any, *, analysis_report: str = "",

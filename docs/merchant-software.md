@@ -7,7 +7,7 @@
 
 ## 1. 启动
 
-便携版解压后双击“启动微信AI智能助理.bat”；源码开发时可运行
+便携版解压后双击“启动威信AI智能助理.bat”；源码开发时可运行
 `python -m wechat_ai_assistant.merchant_app`。
 
 ```

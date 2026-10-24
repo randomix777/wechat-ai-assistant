@@ -99,7 +99,7 @@ class WebWizardFlowTests(unittest.TestCase):
     def test_the_wizard_page_renders_from_the_state(self):
         status, body = self._wizard_page()
         self.assertEqual(status, 200)
-        self.assertIn("微信AI智能助理", body)
+        self.assertIn("威信AI智能助理", body)
 
     def _wizard_page(self):
         with urllib.request.urlopen(self.base + "/wizard", timeout=15) as r:

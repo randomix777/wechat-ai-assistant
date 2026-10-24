@@ -44,9 +44,9 @@ gateway.local.env
 # build is reproducible from deploy/merchant.spec, so the artifacts do not
 # belong in version control either — the same rule as build/ and dist/.
 # 两种命名都挡：文档里是中文名，实际打出来的制品是英文名。
-微信AI智能助理-win64-*.zip
-微信AI智能助理-win64-*.zip.sha256
-微信AI智能助理-win64-*/
+wechat-ai-assistant-win64-*.zip
+wechat-ai-assistant-win64-*.zip.sha256
+wechat-ai-assistant-win64-*/
 wechat-ai-assistant-win64-*.zip
 wechat-ai-assistant-win64-*.zip.sha256
 wechat-ai-assistant-win64-*/

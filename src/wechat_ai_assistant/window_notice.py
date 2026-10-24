@@ -136,7 +136,7 @@ class WaitingNotice:
     #: 窗口尺寸（够放两行中文）。
     SIZE = (420, 120)
 
-    def __init__(self, text: str, title: str = "微信AI智能助理") -> None:
+    def __init__(self, text: str, title: str = "威信AI智能助理") -> None:
         self.text = text
         self.title = title
         self._thread: threading.Thread | None = None

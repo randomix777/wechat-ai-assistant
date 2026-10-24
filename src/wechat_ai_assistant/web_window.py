@@ -286,9 +286,9 @@ def app_title(suffix: str = "") -> str:
     try:
         from .version import __version__
 
-        base = f"微信AI智能助理 {__version__}"
+        base = f"威信AI智能助理 {__version__}"
     except Exception:  # pragma: no cover - 极端裁剪环境
-        base = "微信AI智能助理"
+        base = "威信AI智能助理"
     return f"{base}{suffix}"
 
 

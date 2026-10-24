@@ -99,7 +99,7 @@ def _readme(rows: list, groups: list, missing: list, generated_at: str,
             analysis_role: str = "") -> str:
     encrypted = encrypted or []
     lines = [
-        "微信AI智能助理 · 导出完整包",
+        "威信AI智能助理 · 导出完整包",
         f"生成时间：{generated_at}",
         "来源会话：" + ("、".join(groups) if groups else "未知"),
         f"共 {len(rows)} 条消息。",

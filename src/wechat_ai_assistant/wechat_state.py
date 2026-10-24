@@ -466,7 +466,7 @@ class RealWeChatProbe:
                 # 窗口被最小化到托盘时，UIA 里仍然找得到，只是不可见。
                 # 只查 exists() 会把"我开着微信但收进了托盘"误报成
                 # "微信没打开" —— 而收进托盘是商户的常态：他要一边聊天
-                # 一边跑微信AI智能助理，没道理先把窗口摆出来才能用。
+                # 一边跑威信AI智能助理，没道理先把窗口摆出来才能用。
                 if window.exists(timeout=0.2, visible_only=False):
                     return window
             except Exception as exc:  # pragma: no cover - 取决于本机 UIA

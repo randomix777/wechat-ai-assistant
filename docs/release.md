@@ -15,14 +15,14 @@
 
 ```powershell
 .\.venv\Scripts\pyinstaller.exe deploy\merchant.spec
-Copy-Item deploy\portable.flag dist\微信AI智能助理\portable.flag -Force
-Copy-Item deploy\portable-readme.txt dist\微信AI智能助理\先看我-免安装版.txt -Force
-Copy-Item deploy\启动微信AI智能助理.bat dist\微信AI智能助理\启动微信AI智能助理.bat -Force
+Copy-Item deploy\portable.flag dist\威信AI智能助理\portable.flag -Force
+Copy-Item deploy\portable-readme.txt dist\威信AI智能助理\先看我-免安装版.txt -Force
+Copy-Item deploy\启动威信AI智能助理.bat dist\威信AI智能助理\启动威信AI智能助理.bat -Force
 # 界面打不开时的诊断入口（跑 exe --diagnose，把报告用记事本打开让商户发回来）
-Copy-Item deploy\诊断-发给客服.bat dist\微信AI智能助理\诊断-发给客服.bat -Force
+Copy-Item deploy\诊断-发给客服.bat dist\威信AI智能助理\诊断-发给客服.bat -Force
 ```
 
-产物：`dist/微信AI智能助理/`（启动脚本、中文说明、`微信AI智能助理.exe`、`_internal/` 和便携标记）。
+产物：`dist/威信AI智能助理/`（启动脚本、中文说明、`威信AI智能助理.exe`、`_internal/` 和便携标记）。
 **不要发 onefile**：pywinauto/pywin32 的原生 DLL 在 onefile 下每次启动
 都要解包，又慢又容易被杀软误报（见 `deploy/merchant.spec` 头注）。
 
@@ -66,12 +66,12 @@ WebView2 Runtime。Windows 11 通常已预装；较旧 Windows 设备缺少 Runt
 Runtime（管理员权限，装一次永久有效）：[Evergreen WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)，
 或取离线独立包（约 130 MB）`https://go.microsoft.com/fwlink/?linkid=2124701` 双击安装。
 
-用户右键 ZIP 选择“全部解压”，再双击“启动微信AI智能助理.bat”，不需要安装程序。
-**直接双击 `微信AI智能助理.exe` 也一样**（数据目录按 exe 自己的位置算，与工作目录无关；
+用户右键 ZIP 选择“全部解压”，再双击“启动威信AI智能助理.bat”，不需要安装程序。
+**直接双击 `威信AI智能助理.exe` 也一样**（数据目录按 exe 自己的位置算，与工作目录无关；
 升级流程也是直接起 exe，见 `updater.build_updater_script`）。bat 只剩两个作用：把工作目录
 切到程序目录、透传参数（`--page dev` 之类）。所以它**不是**唯一入口，删掉也不会影响启动 ——
 只是商户手册和客服话术都指着它，暂时留着更省事。
-启动脚本里**必须**用 `start "" "微信AI智能助理.exe"`，不能直接写 `"微信AI智能助理.exe"`：
+启动脚本里**必须**用 `start "" "威信AI智能助理.exe"`，不能直接写 `"威信AI智能助理.exe"`：
 后者会让 cmd 一直等窗口版 exe 退出，黑框从头挂到尾（exe 本身已经是 `console=False`）。
 .bat **必须是 CRLF 换行**（`.gitattributes` 里 `*.bat eol=crlf` 钉住了）：cmd 读 LF 结尾的
 批处理时，`chcp 65001` 之后的含中文行会被截断成"命令"，exe 名正好是中文，启动直接失败。
@@ -93,7 +93,7 @@ Runtime（管理员权限，装一次永久有效）：[Evergreen WebView2 Runti
 
 方向在 `build_icon.py` 的 `DIRECTIONS` 里，加一个函数就是一个新方向。
 
-发版前冒烟：双击 `dist/微信AI智能助理/微信AI智能助理.exe`，
+发版前冒烟：双击 `dist/威信AI智能助理/威信AI智能助理.exe`，
 走一遍"登录 → 选群 → 读历史"，**顶栏那个版本号**（`v1.11.0` 这种）和这次发的号对得上才算数。
 （版本号由 `version.py` 一处给出，`/api/state` 的 `version` 字段带到界面顶栏。）
 
@@ -108,13 +108,13 @@ Runtime（管理员权限，装一次永久有效）：[Evergreen WebView2 Runti
 
 ```powershell
 $ver = "1.9.9"  # 与 version.py 一致，去掉开头的 v
-Compress-Archive -Path "dist\微信AI智能助理" `
-  -DestinationPath "微信AI智能助理-win64-$ver.zip" -Force
-(Get-FileHash "微信AI智能助理-win64-$ver.zip" -Algorithm SHA256).Hash.ToLower() `
-  | Out-File "微信AI智能助理-win64-$ver.zip.sha256" -NoNewline -Encoding ascii
+Compress-Archive -Path "dist\威信AI智能助理" `
+  -DestinationPath "wechat-ai-assistant-win64-$ver.zip" -Force
+(Get-FileHash "wechat-ai-assistant-win64-$ver.zip" -Algorithm SHA256).Hash.ToLower() `
+  | Out-File "wechat-ai-assistant-win64-$ver.zip.sha256" -NoNewline -Encoding ascii
 ```
 
-* zip 里**只有** `微信AI智能助理/` 这一层目录（多套一层也行，客户端只扒一层）。
+* zip 里**只有** `威信AI智能助理/` 这一层目录（多套一层也行，客户端只扒一层）。
 * `.sha256` 文件内容是单个文件的十六进制哈希（可带文件名后缀，取第一段）。
 * `.sha256` 现在是给**老客户端**留的（1.9.9 及以前只认它）；新客户端认签名清单，
   见下一节。两个都传，谁都别落。
@@ -127,12 +127,12 @@ Compress-Archive -Path "dist\微信AI智能助理" `
 # 把打印出来的 PUBLISHER_PUBKEY = "…" 粘进 src/wechat_ai_assistant/update_signature.py
 
 # 每次发版：签安装包，产出 dist\latest.json + dist\latest.json.sig
-.\.venv\Scripts\python.exe deploy\sign_release.py sign "微信AI智能助理-win64-$ver.zip" `
+.\.venv\Scripts\python.exe deploy\sign_release.py sign "wechat-ai-assistant-win64-$ver.zip" `
   --version $ver --notes "修了…" --out dist
 
 # 发布前自查：拿客户端钉的那把公钥验一遍，顺便核对 zip 哈希
 .\.venv\Scripts\python.exe deploy\sign_release.py verify dist\latest.json `
-  --zip "微信AI智能助理-win64-$ver.zip"
+  --zip "wechat-ai-assistant-win64-$ver.zip"
 ```
 
 * 私钥默认在 `%USERPROFILE%\.wechat-ai-assistant\publisher-key.json`。`new-key --force` 换钥匙后
@@ -160,7 +160,7 @@ Compress-Archive -Path "dist\微信AI智能助理" `
 
 # 每次发版：清单仍在本机生成，只把清单字节发给签名路由，签名拿回来本机先验一遍
 $env:RELEASE_SIGN_TOKEN = "<自己生成的长随机串>"
-.\.venv\Scripts\python.exe deploy\sign_release.py sign "微信AI智能助理-win64-$ver.zip" `
+.\.venv\Scripts\python.exe deploy\sign_release.py sign "wechat-ai-assistant-win64-$ver.zip" `
   --version $ver --remote https://ai.jyisolutions.com/api/internal/release/sign
 ```
 
@@ -178,7 +178,7 @@ $env:RELEASE_SIGN_TOKEN = "<自己生成的长随机串>"
 换取仅用于工具中心的 120 秒短时 Bearer token；原始设备令牌不会发给工具中心。
 工具中心再把已验证邮箱映射到 JYI 用户，并对每次更新检查和下载执行现有审批授权校验。
 
-1. 管理后台 → 工具 → 微信 AI 助手 → 上传新版本：填版本号、上传 `微信AI智能助理-win64-<版本>.zip`；
+1. 管理后台 → 工具 → 微信 AI 助手 → 上传新版本：填版本号、上传 `wechat-ai-assistant-win64-<版本>.zip`；
 2. 同一版的两个字段里粘上签名（就是 `sign` 命令产出的那两个文件的内容）：
    * **签名清单** = `dist\latest.json`
    * **签名** = `dist\latest.json.sig`

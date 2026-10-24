@@ -14,13 +14,13 @@ param([Parameter(Mandatory = $true)][ValidateSet('success', 'rollback')][string]
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $tmp = Join-Path $env:TEMP 'pyw-real-rehearsal'
-$base = Join-Path $tmp '微信AI智能助理'
+$base = Join-Path $tmp '威信AI智能助理'
 $version = '9.9.9'
-$backup = Join-Path $tmp "微信AI智能助理_backup-$version"
+$backup = Join-Path $tmp "威信AI智能助理_backup-$version"
 $scriptPath = Join-Path $env:TEMP "pyw-apply-$version.bat"
 $logPath = Join-Path $env:TEMP "pyw-apply-$version.log"
 
-$packaged = Join-Path $repo 'dist\微信AI智能助理'
+$packaged = Join-Path $repo 'dist\威信AI智能助理'
 if (-not (Test-Path $packaged)) { throw "先打包：没有 $packaged" }
 if (-not (Test-Path (Join-Path $packaged '_internal'))) { throw "$packaged 不像打好的包（缺 _internal）" }
 
@@ -33,7 +33,7 @@ function Read-TextOrEmpty([string]$Path) {
 }
 function Stamp { (Get-Date).ToString('HH:mm:ss') }
 
-Get-Process -Name '微信AI智能助理' -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process -Name '威信AI智能助理' -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 2
 Remove-Item $scriptPath, $logPath -Force -ErrorAction SilentlyContinue
 if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
@@ -43,7 +43,7 @@ Copy-Item -Recurse $packaged $base
 # 便携数据：假装商户已经用过一阵子
 New-Item -ItemType Directory -Force (Join-Path $base 'data') | Out-Null
 Write-Text (Join-Path $base 'data\shop.json') '{"旧版数据": 1}'
-$oldExeSize = (Get-Item (Join-Path $base '微信AI智能助理.exe')).Length
+$oldExeSize = (Get-Item (Join-Path $base '威信AI智能助理.exe')).Length
 
 # 暂存的"新版"：同一份包 + 一个只有新版才有的标记文件
 $staged = Join-Path $base "_updates\$version"
@@ -52,13 +52,13 @@ Copy-Item -Recurse (Join-Path $packaged '*') $staged
 Write-Text (Join-Path $staged '新版标记.txt') '这是新版'
 if ($Case -eq 'rollback') {
     # 起不来：主程序换成 ping（一跑就退），目录结构仍然是真的
-    Copy-Item "$env:SystemRoot\System32\ping.exe" (Join-Path $staged '微信AI智能助理.exe') -Force
+    Copy-Item "$env:SystemRoot\System32\ping.exe" (Join-Path $staged '威信AI智能助理.exe') -Force
 }
 # pending.json 必须是无 BOM 的 UTF-8：带 BOM 的话 Python 那边 json.loads 直接失败
 Write-Text (Join-Path $base 'pending.json') "{`"version`": `"$version`", `"dir`": `"$version`", `"notes`": `"换版演练`"}"
 
-Write-Host "=== [$Case] $(Stamp) 启动旧版：$base\微信AI智能助理.exe"
-$proc = Start-Process -FilePath (Join-Path $base '微信AI智能助理.exe') -PassThru
+Write-Host "=== [$Case] $(Stamp) 启动旧版：$base\威信AI智能助理.exe"
+$proc = Start-Process -FilePath (Join-Path $base '威信AI智能助理.exe') -PassThru
 $deadline = (Get-Date).AddSeconds(150)
 while (-not $proc.HasExited -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 1 }
 Write-Host "$(Stamp) 启动器退出：$($proc.HasExited)"
@@ -78,7 +78,7 @@ Start-Sleep -Seconds 3
 
 Write-Host '--- 结果 ---'
 $expectNew = $Case -eq 'success'
-$newExeSize = (Get-Item (Join-Path $base '微信AI智能助理.exe')).Length
+$newExeSize = (Get-Item (Join-Path $base '威信AI智能助理.exe')).Length
 Write-Host "新版标记.txt 在位      : $(Test-Path (Join-Path $base '新版标记.txt'))   (期望 $expectNew)"
 Write-Host "备份目录还在           : $(Test-Path $backup)   (期望 False)"
 Write-Host "暂存目录还在           : $(Test-Path (Join-Path $base "_updates\$version"))   (期望 False)"
@@ -90,10 +90,10 @@ if (-not $expectNew) {
     Write-Host "回滚记号 blocked-$version : $(Test-Path (Join-Path $base "blocked-$version.txt"))   (期望 True)"
     Write-Host "  内容：$(Read-TextOrEmpty (Join-Path $base "blocked-$version.txt"))"
 }
-Write-Host "进程在跑               : $((Get-Process -Name '微信AI智能助理' -ErrorAction SilentlyContinue | Measure-Object).Count)"
+Write-Host "进程在跑               : $((Get-Process -Name '威信AI智能助理' -ErrorAction SilentlyContinue | Measure-Object).Count)"
 Write-Host "换版脚本残留           : $((Get-ChildItem $env:TEMP -Filter 'pyw-apply-*.bat' -ErrorAction SilentlyContinue).Name -join ',')"
 Write-Host "--- 换版日志 $logPath ---"
 if (Test-Path $logPath) { Write-Host (Read-TextOrEmpty $logPath).TrimEnd() } else { Write-Host '（没有日志：脚本没跑起来，或死在写第一行之前）' }
 
-Get-Process -Name '微信AI智能助理' -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process -Name '威信AI智能助理' -ErrorAction SilentlyContinue | Stop-Process -Force
 Write-Host "演练目录：$tmp"

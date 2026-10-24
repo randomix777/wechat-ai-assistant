@@ -151,7 +151,7 @@ class _CallbackHandler(http.server.BaseHTTPRequestHandler):
             self._reply(
                 200,
                 "登录成功",
-                "可以关闭这个浏览器标签页，回到微信AI智能助理继续。",
+                "可以关闭这个浏览器标签页，回到威信AI智能助理继续。",
             )
 
     def _reply(self, code: int, title: str, body: str) -> None:
