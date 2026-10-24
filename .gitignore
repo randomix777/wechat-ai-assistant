@@ -43,10 +43,14 @@ gateway.local.env
 # Release bundles and the checksums/tool caches that sit next to them. The
 # build is reproducible from deploy/merchant.spec, so the artifacts do not
 # belong in version control either — the same rule as build/ and dist/.
-# 两种命名都挡：文档里是中文名，实际打出来的制品是英文名。
+# 两种命名都挡：历史制品是中文名，现在的制品和 GitHub 资产是英文名
+# （GitHub 资产名会剥掉非 ASCII，中文附件传上去就损坏）。
 wechat-ai-assistant-win64-*.zip
 wechat-ai-assistant-win64-*.zip.sha256
 wechat-ai-assistant-win64-*/
+微信AI智能助理-win64-*.zip
+微信AI智能助理-win64-*.zip.sha256
+微信AI智能助理-win64-*/
 wechat-ai-assistant-win64-*.zip
 wechat-ai-assistant-win64-*.zip.sha256
 wechat-ai-assistant-win64-*/
