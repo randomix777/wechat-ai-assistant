@@ -381,6 +381,11 @@ class WebState:
                 # 判据在向导（Wizard._analysis_ready），页面只渲染不自己判。
                 "analysis_ready": bool(getattr(getattr(self.app, "wizard", None),
                                                "analysis_ready", False)),
+                # 上次点了「读取全部」、全量整理还没做：页面拿它把"下一次整理
+                # 覆盖全部消息（不止新增）、按用量计费"说明白，别让商户被账单
+                # 吓一跳。判据同样在向导（Wizard.full_analysis_pending）。
+                "full_analysis_pending": bool(getattr(getattr(self.app, "wizard", None),
+                                                      "full_analysis_pending", False)),
                 "error": self.error,
                 "notice": self.notice,
                 "reading_notice": self.reading_notice,

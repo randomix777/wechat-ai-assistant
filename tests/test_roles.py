@@ -209,9 +209,9 @@ class WizardRoleDispatchTests(unittest.TestCase):
     def _analyzer(reply: str = "### 报名接龙\n- 张姐 +1", count: int = 1, calls=None):
         """替身 AI 服务：记下被怎么调的，回一段报告正文。"""
 
-        def run(role_id, message_ids):
+        def run(role_id, message_ids, full_history=False):
             if calls is not None:
-                calls.append((role_id, message_ids))
+                calls.append((role_id, message_ids, full_history))
             return {"summary": reply, "message_count": count, "cost": None}
 
         run.calls = calls if calls is not None else []
@@ -235,7 +235,7 @@ class WizardRoleDispatchTests(unittest.TestCase):
                 summary = wizard.analyze(role=ROLE_ACTIVITY)
             self.assertEqual(summary["role_id"], ROLE_ACTIVITY)
             self.assertTrue(summary["uses_model"], "走 AI 就要照实说")
-            self.assertEqual(calls, [(ROLE_ACTIVITY, None)], "要真把角色交给 AI 服务")
+            self.assertEqual(calls, [(ROLE_ACTIVITY, None, False)], "要真把角色交给 AI 服务")
             self.assertIn("报名接龙", summary["role_report"]["summary"])
             self.assertFalse(organize.called, "本机规则引擎不该再跑一遍")
             self.assertEqual(wizard.step, WizardStep.ANALYZE,
@@ -291,7 +291,7 @@ class WizardRoleDispatchTests(unittest.TestCase):
     def test_the_ai_service_reason_reaches_the_merchant(self):
         """AI 服务说得出原因（比如没登录）就照原话说，不改成"请重启"。"""
         wizard, store, tmp = self._wizard(
-            analyzer=lambda role_id, message_ids: {"error": "需要登录产品账号"})
+            analyzer=lambda role_id, message_ids, full_history=False: {"error": "需要登录产品账号"})
         try:
             with self.assertRaises(RuntimeError) as ctx:
                 wizard.analyze(role=ROLE_GENERIC)
@@ -332,8 +332,8 @@ class WizardRoleDispatchTests(unittest.TestCase):
         from wechat_ai_assistant import summary_task
 
         wizard, store, tmp = self._wizard(
-            analyzer=lambda role_id, message_ids: {"error": "没读到消息",
-                                                   "message_count": 0})
+            analyzer=lambda role_id, message_ids, full_history=False: {"error": "没读到消息",
+                                                                       "message_count": 0})
         try:
             summary_task.save_role_report(store, wizard.tenant, ROLE_ACTIVITY,
                                           "### 报名接龙\n- 张姐 +1", 7)
@@ -351,8 +351,8 @@ class WizardRoleDispatchTests(unittest.TestCase):
     def test_no_new_messages_and_no_stored_report_says_why(self):
         """没新消息、也没存过报告，就把原因说清楚（不许装成功）。"""
         wizard, store, tmp = self._wizard(
-            analyzer=lambda role_id, message_ids: {"error": "没读到消息",
-                                                   "message_count": 0})
+            analyzer=lambda role_id, message_ids, full_history=False: {"error": "没读到消息",
+                                                                       "message_count": 0})
         try:
             with self.assertRaises(RuntimeError) as ctx:
                 wizard.analyze(role=ROLE_ACTIVITY)

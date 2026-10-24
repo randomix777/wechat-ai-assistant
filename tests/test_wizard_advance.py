@@ -121,7 +121,7 @@ class AdvanceTests(unittest.TestCase):
 
         wizard = _wizard(
             selected=True,
-            role_analyzer=lambda role_id, message_ids: {
+            role_analyzer=lambda role_id, message_ids, full_history=False: {
                 "summary": "要注意：张姐说记得带身份证。", "message_count": 1},
         )
         # 角色整理也过额度门，给一份够用的快照就不用联网查。

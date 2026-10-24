@@ -135,8 +135,9 @@ class PageAndStateTests(unittest.TestCase):
         self.assertEqual(status, 200)
         for key in ("step", "steps", "busy", "error", "logs", "conversations", "orders",
                     "summary_stream", "reasoning_stream", "analysis_progress", "analysis",
-                    "history", "progress"):
-            self.assertIn(key, data, f"\u9875\u9762\u8981\u7528 {key}\uff0c\u4f46\u72b6\u6001\u91cc\u6ca1\u6709")
+                    "history", "progress", "full_analysis_pending",
+                    "analysis_ready"):
+            self.assertIn(key, data, f"页面要用 {key}，但状态里没有")
 
     def test_the_steps_come_from_the_wizard_not_from_the_page(self):
         """步骤条数据由向导给出：编号、标题、走到哪一步。

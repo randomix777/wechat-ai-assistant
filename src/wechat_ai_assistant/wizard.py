@@ -267,7 +267,7 @@ class Wizard:
         on_wechat: Callable[[WeChatStatus], None] | None = None,
         on_history_done: Callable[[HistoryResult], None] | None = None,
         is_product_logged_in: Callable[[], bool] | None = None,
-        role_analyzer: Callable[[str, Sequence[str] | None], Mapping[str, Any]] | None = None,
+        role_analyzer: Callable[[str, Sequence[str] | None, bool], Mapping[str, Any]] | None = None,
     ):
         self.store = settings_store
         self.settings = settings_store.load()
@@ -300,6 +300,10 @@ class Wizard:
         #: （看完自己点「下一步」），不许自动跳到分析详情 —— 以前跑完直接
         #: 换屏，正文一闪而过。判据只此一处，``advance()`` 和界面都问它。
         self._analysis_ready = False
+        #: 「读取全部」欠下的那一次全量整理。读取层只管把消息搬进库；商户点
+        #: 「读取全部」的意图是**全部都要分析**（只要增量他会点「更新消息」），
+        #: 所以这里挂着，等下一次角色整理消费掉 —— 一次性，再点整理回到增量。
+        self._pending_full_analysis = False
         self.quota = QuotaView()
         self._lock = threading.RLock()
         self._analyzed_ids: list[str] = []
@@ -398,6 +402,11 @@ class Wizard:
     def analysis_ready(self) -> bool:
         """这一轮整理跑完了没有（界面渲染和 :meth:`advance` 的门禁都问它）。"""
         return self._analysis_ready
+
+    @property
+    def full_analysis_pending(self) -> bool:
+        """上次「读取全部」之后还欠不欠一次全量整理（界面只显示，不自己判）。"""
+        return bool(getattr(self, "_pending_full_analysis", False))
 
     def advance(self) -> dict[str, Any]:
         """把向导往前推一步 —— 界面上所有「下一步」共用这一个判据。
@@ -619,6 +628,9 @@ class Wizard:
             sender_source=sender_source,
         )
         self.history_result = result
+        # 「读取全部」挂起一次全量整理（见 _pending_full_analysis 的注释）；
+        # 「更新消息」「按范围读」都不挂。
+        self._pending_full_analysis = (mode == ReadMode.ALL)
         self._log(f"历史读取完成：{result.headline()}")
         for gap in result.gaps:
             self._log(f"注意：{gap}")
@@ -825,7 +837,13 @@ class Wizard:
         self.require_quota()
         self._go(WizardStep.ANALYZE)
         self._analysis_ready = False
-        outcome = dict(self.role_analyzer(role_def.id, message_ids) or {})
+        # 「读取全部」欠下的全量在这里消费：只对让分析器自己挑消息的常规路径
+        # 生效，调用方点名 message_ids 时尊重点名。做成**成功才摘**——中途
+        # 失败（网络、上游）重试时仍然全量，不能让商户为一次故障把全量
+        # 悄悄降级成增量。
+        full_history = bool(message_ids is None and self._pending_full_analysis)
+        outcome = dict(self.role_analyzer(role_def.id, message_ids,
+                                          full_history=full_history) or {})
         if outcome.get("error"):
             # "没有新消息"不是失败：这一批该角色已经分析完了（水位线到头）。
             # 以前这里直接报错，于是**重启之后**商户既看不到上次那份报告
@@ -837,6 +855,8 @@ class Wizard:
                                              int(stored.get("total") or 0),
                                              reused_from_store=True)
                 self._analysis_ready = True
+                if full_history:
+                    self._pending_full_analysis = False
                 return summary
             raise RuntimeError(str(outcome["error"]))
         if outcome.get("cancelled"):
@@ -850,6 +870,10 @@ class Wizard:
         self._log(f"AI 整理完成（{role_def.name}）：处理 {summary['processed']} 条消息")
         # 停在整理屏给商户看结论，点「下一步」再去分析详情。
         self._analysis_ready = True
+        # 全量意图随这次**真正跑过的**全量一并消费：再点「整理」回到增量
+        # （水位线已推到头）。点名 message_ids 的整理没消费它，留着。
+        if full_history:
+            self._pending_full_analysis = False
         return summary
 
     def _stored_role_report(self, role_id: str) -> dict[str, Any] | None:

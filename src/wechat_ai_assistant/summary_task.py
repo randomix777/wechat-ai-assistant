@@ -2191,6 +2191,7 @@ def run_summary(app: Any, result: Any, role_id: str = "",
                 on_stream: Any = None,
                 is_cancelled: Any = None,
                 incremental: bool | None = None,
+                full_history: bool = False,
                 force_refresh: bool = False,
                 on_reasoning: Any = None) -> dict[str, Any]:
     """经云网关跑摘要。**在后台线程里跑，调用方不许碰界面。**
@@ -2201,11 +2202,15 @@ def run_summary(app: Any, result: Any, role_id: str = "",
     ``is_cancelled`` 为可调用对象时，每个批次/轮询间隙检查一次；
     取消后返回已完成分段与 ``cancelled=True``。
     ``role_id`` 非空时默认走按角色增量路径；调用方可用 ``incremental=False``
-    声明全量报告应覆盖旧报告。``force_refresh`` 跳过本地已完成分段缓存，
+    声明全量报告应覆盖旧报告。``full_history`` 忽略该角色的分析水位线和
+    条数上限，把所选会话全部已入库消息都送模型 —— 商户点「读取全部」之后
+    的那一次整理（意图由 :class:`~wechat_ai_assistant.wizard.Wizard` 挂起并
+    一次性消费）。``force_refresh`` 跳过本地已完成分段缓存，
     用于用户明确要求重新分析全部历史的场景。
     """
     messages = (messages_override if messages_override is not None else
                 messages_for_summary(app, result, role_id=role_id,
+                                     full_history=full_history,
                                      defer_watermarks=bool(role_id)))
     is_incremental = bool(role_id) if incremental is None else bool(incremental)
     if not messages:

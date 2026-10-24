@@ -957,8 +957,14 @@ class MerchantApplication:
         return result_holder.get("summary")
 
     def _run_role_analysis(self, role_id: str,
-                           message_ids: Sequence[str] | None = None) -> dict[str, Any]:
-        """Run a non-order role through the same account-backed AI service."""
+                           message_ids: Sequence[str] | None = None,
+                           full_history: bool = False) -> dict[str, Any]:
+        """Run a non-order role through the same account-backed AI service.
+
+        ``full_history``：商户点了「读取全部」之后的那一次整理——忽略该角色
+        的分析水位线，把所选会话**全部**已入库消息都送模型（见
+        ``summary_task.messages_for_summary``）。常规增量路径不传。
+        """
         from . import summary_task
 
         messages_override = None
@@ -989,6 +995,8 @@ class MerchantApplication:
         return summary_task.run_summary(
             self, self.wizard.history_result, role_id=role_id,
             messages_override=messages_override,
+            full_history=full_history,
+            incremental=False if full_history else None,
             on_progress=self._analysis_progress,
             on_stream=getattr(self.events, "on_analysis_stream", None),
             on_reasoning=getattr(self.events, "on_analysis_reasoning", None),

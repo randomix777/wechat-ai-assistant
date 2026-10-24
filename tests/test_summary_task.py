@@ -758,6 +758,40 @@ class WatermarkTests(unittest.TestCase):
         other = summary_task.messages_for_summary(self.app, result, role_id="r2")
         self.assertEqual(len(other), 1)
 
+    def test_full_history_ignores_the_watermark(self):
+        """「读取全部」欠下的那次全量：水位线之内也要取出来。
+
+        商户点「读取全部」的意图是**全部分析** —— 只要增量他会点「更新消息」。
+        full_history 是这个意图到取数层的落点（Wizard 挂起、run_summary 传入）。
+        """
+        self._add("all", [("张姐", "要两箱苹果", "text")] * 3)
+        result = _result(self.store, self.tenant, total=3)
+        first = summary_task.messages_for_summary(self.app, result, role_id="r1")
+        self.assertEqual(len(first), 3)
+        self._add("new", [("李叔", "李记酱油 2 瓶", "text")], time_offset=3)
+        full = summary_task.messages_for_summary(self.app, result, role_id="r1",
+                                                 full_history=True)
+        self.assertEqual(len(full), 4, "全量不许被水位线拦住")
+        self.assertEqual(full[0]["content"], "要两箱苹果", "全量按时间正序从头取")
+
+    def test_full_history_ignores_the_cost_ceiling(self):
+        """一次 200 条的成本上限只属于增量路径；全量把库里的话都取完。
+
+        205 条消息：增量（无水位线 → 取最近一批）拿 200 条，全量拿 205 条。
+        """
+        bulk = [{"sender": "王五", "content": f"第 {i:03d} 句", "kind": "text",
+                 "sent_at": f"2026-10-14 {9 + i // 60:02d}:{i % 60:02d}:00",
+                 "source_id": f"bulk-{i}"}
+                for i in range(summary_task.SUMMARY_MESSAGE_LIMIT + 5)]
+        self.store.add_import(self.tenant, GROUP, bulk, "bulk", "demo")
+        result = _result(self.store, self.tenant, total=len(bulk))
+        incremental = summary_task.messages_for_summary(self.app, result, role_id="r9")
+        self.assertEqual(len(incremental), summary_task.SUMMARY_MESSAGE_LIMIT,
+                         "增量路径守住成本上限")
+        everything = summary_task.messages_for_summary(self.app, result,
+                                                       role_id="r9", full_history=True)
+        self.assertEqual(len(everything), len(bulk), "全量不受成本上限约束")
+
     def test_role_change_refetches_full(self):
         """换角色重新取全量，不受旧角色水位线影响。"""
         self._add("all", [("张姐", "要两箱苹果", "text")] * 2)
