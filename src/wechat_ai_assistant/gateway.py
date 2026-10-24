@@ -1336,7 +1336,7 @@ class ProductGateway:
     # ------------------------------------------------------------- responses
 
     def _health(self) -> GatewayResponse:
-        body: dict[str, Any] = {"ok": True, "service": "wechat-ai-assistant-gateway", **self.store.health()}
+        body: dict[str, Any] = {"ok": True, "service": "wx-ai-assistant-gateway", **self.store.health()}
         return _json(200, body)
 
     def execution_backend_report(self) -> dict[str, Any]:

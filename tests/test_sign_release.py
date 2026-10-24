@@ -23,7 +23,7 @@ from unittest import mock
 from wechat_ai_assistant import update_signature as signing
 
 ROOT = Path(__file__).resolve().parents[1]
-ZIP_NAME = "wechat-ai-assistant-win64-1.101.0.zip"
+ZIP_NAME = "wx-ai-assistant-win64-1.101.0.zip"
 TOKEN = "tok-1234"
 
 needs_cng = unittest.skipUnless(

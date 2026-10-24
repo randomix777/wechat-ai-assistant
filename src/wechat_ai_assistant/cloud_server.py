@@ -530,7 +530,7 @@ def _load_agent_tokens() -> dict[str, str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="wechat-ai-assistant-cloud")
+    parser = argparse.ArgumentParser(prog="wx-ai-assistant-cloud")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--token", default=os.environ.get("WECHAT_AI_CLOUD_TOKEN", ""))

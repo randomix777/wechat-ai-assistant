@@ -555,7 +555,7 @@ def _wxgf_to_jpeg(data: bytes) -> bytes | None:
     if start < 0:
         return None
     try:
-        with tempfile.TemporaryDirectory(prefix="wechat-ai-assistant-wxgf-") as temp:
+        with tempfile.TemporaryDirectory(prefix="wx-ai-assistant-wxgf-") as temp:
             source = Path(temp) / "image.hevc"
             target = Path(temp) / "image.jpg"
             source.write_bytes(data[start:])

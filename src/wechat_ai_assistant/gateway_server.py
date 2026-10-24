@@ -78,7 +78,7 @@ DRAIN_TIMEOUT_SECONDS = 5.0
 
 class GatewayHTTPRequestHandler(BaseHTTPRequestHandler):
     gateway: ProductGateway
-    server_version = "wechat-ai-assistant-gateway/1"
+    server_version = "wx-ai-assistant-gateway/1"
     sys_version = ""
     protocol_version = "HTTP/1.1"
     _close_connection_after = False
@@ -483,7 +483,7 @@ def _bootstrap_catalog(gateway: Any, db_path: str, policy_path: str) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="wechat-ai-assistant-gateway")
+    parser = argparse.ArgumentParser(prog="wx-ai-assistant-gateway")
     parser.add_argument("--host", default=os.environ.get("WECHAT_AI_GATEWAY_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("WECHAT_AI_GATEWAY_PORT", "8080")))
     parser.add_argument("--db", default=os.environ.get("WECHAT_AI_PRODUCT_DB", "product.db"))

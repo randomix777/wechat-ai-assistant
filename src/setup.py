@@ -1,6 +1,6 @@
 import sys
 from setuptools import find_packages, setup
-setup(name='wechat-ai-assistant',
+setup(name='wx-ai-assistant',
 version='1.11.1',
 author='Hello-Mr-Crab',
 author_email='3083256475@qq.com',
@@ -11,7 +11,7 @@ platforms=["Windows"],
 description='Windows WeChat automation and AI merchant assistant',
 long_description=open('README.md','r',encoding='utf-8').read(),
 long_description_content_type='text/markdown',  
-url='https://github.com/randomix777/wechat-ai-assistant',
+url='https://github.com/randomix777/wx-ai-assistant',
 # 32-bit releases retain the legacy 3.9 package only.
 packages=find_packages() if sys.maxsize==2**63-1 else ['pywechat'],
 license='LGPL',

@@ -120,7 +120,7 @@ class _CallbackHandler(http.server.BaseHTTPRequestHandler):
     页面内容给商户看：**说清楚发生了什么**，不能让他对着白屏猜。
     """
 
-    server_version = "wechat-ai-assistant"
+    server_version = "wx-ai-assistant"
     #: 由 :class:`LoopbackReceiver` 注入。
     sink: Callable[[CallbackResult], None] | None = None
 

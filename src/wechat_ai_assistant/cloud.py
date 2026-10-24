@@ -46,7 +46,7 @@ class CloudClient:
         data = None
         headers = {
             "Accept": "application/json",
-            "User-Agent": "wechat-ai-assistant-agent/1",
+            "User-Agent": "wx-ai-assistant-agent/1",
             "X-Agent-Id": self.agent_id,
         }
         if self.device_token:

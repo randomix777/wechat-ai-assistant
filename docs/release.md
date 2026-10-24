@@ -109,9 +109,9 @@ Runtime（管理员权限，装一次永久有效）：[Evergreen WebView2 Runti
 ```powershell
 $ver = "1.9.9"  # 与 version.py 一致，去掉开头的 v
 Compress-Archive -Path "dist\威信AI智能助理" `
-  -DestinationPath "wechat-ai-assistant-win64-$ver.zip" -Force
-(Get-FileHash "wechat-ai-assistant-win64-$ver.zip" -Algorithm SHA256).Hash.ToLower() `
-  | Out-File "wechat-ai-assistant-win64-$ver.zip.sha256" -NoNewline -Encoding ascii
+  -DestinationPath "wx-ai-assistant-win64-$ver.zip" -Force
+(Get-FileHash "wx-ai-assistant-win64-$ver.zip" -Algorithm SHA256).Hash.ToLower() `
+  | Out-File "wx-ai-assistant-win64-$ver.zip.sha256" -NoNewline -Encoding ascii
 ```
 
 * zip 里**只有** `威信AI智能助理/` 这一层目录（多套一层也行，客户端只扒一层）。
@@ -127,12 +127,12 @@ Compress-Archive -Path "dist\威信AI智能助理" `
 # 把打印出来的 PUBLISHER_PUBKEY = "…" 粘进 src/wechat_ai_assistant/update_signature.py
 
 # 每次发版：签安装包，产出 dist\latest.json + dist\latest.json.sig
-.\.venv\Scripts\python.exe deploy\sign_release.py sign "wechat-ai-assistant-win64-$ver.zip" `
+.\.venv\Scripts\python.exe deploy\sign_release.py sign "wx-ai-assistant-win64-$ver.zip" `
   --version $ver --notes "修了…" --out dist
 
 # 发布前自查：拿客户端钉的那把公钥验一遍，顺便核对 zip 哈希
 .\.venv\Scripts\python.exe deploy\sign_release.py verify dist\latest.json `
-  --zip "wechat-ai-assistant-win64-$ver.zip"
+  --zip "wx-ai-assistant-win64-$ver.zip"
 ```
 
 * 私钥默认在 `%USERPROFILE%\.wechat-ai-assistant\publisher-key.json`。`new-key --force` 换钥匙后
@@ -160,7 +160,7 @@ Compress-Archive -Path "dist\威信AI智能助理" `
 
 # 每次发版：清单仍在本机生成，只把清单字节发给签名路由，签名拿回来本机先验一遍
 $env:RELEASE_SIGN_TOKEN = "<自己生成的长随机串>"
-.\.venv\Scripts\python.exe deploy\sign_release.py sign "wechat-ai-assistant-win64-$ver.zip" `
+.\.venv\Scripts\python.exe deploy\sign_release.py sign "wx-ai-assistant-win64-$ver.zip" `
   --version $ver --remote https://ai.jyisolutions.com/api/internal/release/sign
 ```
 
@@ -178,7 +178,7 @@ $env:RELEASE_SIGN_TOKEN = "<自己生成的长随机串>"
 换取仅用于工具中心的 120 秒短时 Bearer token；原始设备令牌不会发给工具中心。
 工具中心再把已验证邮箱映射到 JYI 用户，并对每次更新检查和下载执行现有审批授权校验。
 
-1. 管理后台 → 工具 → 微信 AI 助手 → 上传新版本：填版本号、上传 `wechat-ai-assistant-win64-<版本>.zip`；
+1. 管理后台 → 工具 → 微信 AI 助手 → 上传新版本：填版本号、上传 `wx-ai-assistant-win64-<版本>.zip`；
 2. 同一版的两个字段里粘上签名（就是 `sign` 命令产出的那两个文件的内容）：
    * **签名清单** = `dist\latest.json`
    * **签名** = `dist\latest.json.sig`
@@ -196,7 +196,7 @@ $env:RELEASE_SIGN_TOKEN = "<自己生成的长随机串>"
 2. 在 GitHub 建 Release（tag 同名），上传 `.zip`、`.zip.sha256`、`latest.json`、`latest.json.sig`；
 3. Release 正文写人话（修了什么、要不要立即更新）。
 
-仓库默认查 `randomix777/wechat-ai-assistant` 的 releases，换地方发版要同步改
+仓库默认查 `randomix777/wx-ai-assistant` 的 releases，换地方发版要同步改
 `src/wechat_ai_assistant/updater.py` 的 `DEFAULT_REPO`。
 清单里没有 `notes` 时，客户端就用工具中心那一版的发布说明（再退到 GitHub 正文）。
 

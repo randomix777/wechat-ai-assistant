@@ -372,7 +372,7 @@ class MerchantClient:
     ) -> dict[str, Any]:
         url = f"{self.base_url}/{path.lstrip('/')}"
         data = json.dumps(dict(payload), ensure_ascii=False, default=str).encode("utf-8") if payload is not None else None
-        headers = {"Accept": "application/json", "User-Agent": "wechat-ai-assistant-shop/1"}
+        headers = {"Accept": "application/json", "User-Agent": "wx-ai-assistant-shop/1"}
         if extra_headers:
             headers.update({str(key): str(value) for key, value in extra_headers.items()})
         if data is not None:
@@ -454,7 +454,7 @@ class MerchantClient:
         url = f"{self.base_url}/{path.lstrip('/')}"
         data = json.dumps(dict(payload), ensure_ascii=False, default=str).encode("utf-8")
         headers = {"Accept": "text/event-stream", "Content-Type": "application/json",
-                   "Cache-Control": "no-cache", "User-Agent": "wechat-ai-assistant-shop/1"}
+                   "Cache-Control": "no-cache", "User-Agent": "wx-ai-assistant-shop/1"}
         if extra_headers:
             headers.update({str(key): str(value) for key, value in extra_headers.items()})
         if authenticated and self.session is not None and self.session.access_token:

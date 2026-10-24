@@ -256,7 +256,7 @@ class MessageLedger:
 
 
 class UiOperationQueue:
-    def __init__(self, max_pending: int = 100, thread_name: str = "wechat-ai-assistant-ui"):
+    def __init__(self, max_pending: int = 100, thread_name: str = "wx-ai-assistant-ui"):
         if max_pending < 1:
             raise ValueError("max_pending must be positive")
         self._queue: Queue[tuple[Future, Callable[..., T], tuple[Any, ...], dict[str, Any]] | None] = Queue(maxsize=max_pending)

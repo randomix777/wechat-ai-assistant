@@ -622,7 +622,7 @@ class WebHandler(BaseHTTPRequestHandler):
     #: 这个服务读的是哪个数据目录。**必须告诉使用者**。
     #: 目录不对时商户只会看到「没数据 / 未登录」，看不出原因。
     data_dir: str = ""
-    server_version = "wechat-ai-assistant"
+    server_version = "wx-ai-assistant"
 
     # ---- 基础设施 ----
 

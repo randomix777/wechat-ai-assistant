@@ -11,7 +11,7 @@ from .cloud import CloudClient
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="wechat-ai-assistant-agent")
+    parser = argparse.ArgumentParser(prog="wx-ai-assistant-agent")
     parser.add_argument("--group", default=os.environ.get("WECHAT_AI_GROUP", ""))
     parser.add_argument("--db", default=os.environ.get("WECHAT_AI_AGENT_DB", "agent.db"))
     parser.add_argument("--account-id", default=os.environ.get("WECHAT_AI_ACCOUNT_ID", "default"))

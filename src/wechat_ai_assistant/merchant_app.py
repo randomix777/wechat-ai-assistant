@@ -224,7 +224,7 @@ def build_runtime(data_dir: Path, *, gateway: str, device_name: str = "") -> tup
 
 def main(argv: list[str] | None = None) -> int:
     _force_utf8_stdout()
-    parser = argparse.ArgumentParser(prog="wechat-ai-assistant-merchant", description="威信AI智能助理")
+    parser = argparse.ArgumentParser(prog="wx-ai-assistant-merchant", description="威信AI智能助理")
     parser.add_argument("--gateway", default=os.environ.get("WECHAT_AI_GATEWAY_URL", DEFAULT_GATEWAY), help=argparse.SUPPRESS)
     parser.add_argument("--data-dir", default="", help=argparse.SUPPRESS)
     parser.add_argument("--device-name", default=os.environ.get("WECHAT_AI_DEVICE_NAME", ""), help=argparse.SUPPRESS)

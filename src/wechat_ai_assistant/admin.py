@@ -61,7 +61,7 @@ def usd_to_micro(amount: float | int) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="wechat-ai-assistant-admin")
+    parser = argparse.ArgumentParser(prog="wx-ai-assistant-admin")
     parser.add_argument("--db", default="product.db", help="网关 SQLite 文件路径")
     sub = parser.add_subparsers(dest="command", required=True)
 

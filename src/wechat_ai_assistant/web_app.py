@@ -34,7 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     from .merchant_app import (DEFAULT_GATEWAY, build_runtime, default_data_dir,
                               default_device_name)
 
-    parser = argparse.ArgumentParser(prog="wechat-ai-assistant-web",
+    parser = argparse.ArgumentParser(prog="wx-ai-assistant-web",
                                      description="威信AI智能助理（Web 界面）")
     parser.add_argument("--port", type=int, default=0,
                         help="本机端口，0 = 让系统挑一个空闲的")

@@ -176,7 +176,7 @@ class SignedReleaseTests(unittest.TestCase):
         self.assertEqual(info["notes"], "签名版说明")
         # release 里那个官方附件只是备用下载入口
         self.assertEqual(len(info["alt_urls"]), 1)
-        self.assertTrue(info["alt_urls"][0].endswith("wechat-ai-assistant-win64-1.10.0.zip"))
+        self.assertTrue(info["alt_urls"][0].endswith("wx-ai-assistant-win64-1.10.0.zip"))
 
     def test_an_empty_manifest_notes_falls_back_to_the_release_body(self):
         release, blobs = self._signed_release(notes="")
@@ -319,7 +319,7 @@ class JyiReleaseTests(unittest.TestCase):
         assert info is not None
         self.assertEqual(len(info["alt_urls"]), 1)
         fallback = info["alt_urls"][0]
-        self.assertIn("github.com/randomix777/wechat-ai-assistant/releases/download/v1.10.0/",
+        self.assertIn("github.com/randomix777/wx-ai-assistant/releases/download/v1.10.0/",
                       fallback)
         self.assertTrue(fallback.endswith(".zip"), fallback)
         self.assertEqual(unquote(fallback).rsplit("/", 1)[-1],
@@ -500,7 +500,7 @@ class StageTests(unittest.TestCase):
         data = _fake_app_zip()
         digest = hashlib.sha256(data).hexdigest()
         base = Path(tempfile.mkdtemp(prefix="pyw-upd-"))
-        alt = "https://example.com/wechat-ai-assistant-win64-1.9.9.zip"
+        alt = "https://example.com/wx-ai-assistant-win64-1.9.9.zip"
         info = {"version": "1.9.9", "notes": "", "sha256": digest,
                 "zip_url": "https://cdn.example.com/dead.zip", "alt_urls": [alt]}
         calls = []

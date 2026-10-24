@@ -30,7 +30,7 @@ Windows 下运行中的 exe 和 DLL 全被锁死，原地覆盖必失败。
 ## 约定（发版的人必须遵守，见 docs/release.md）
 
 * 版本号就是 Git tag 去掉开头的 ``v``，和 :mod:`wechat_ai_assistant.version` 一致；
-* 安装包叫 ``wechat-ai-assistant-win64-<版本>.zip``，内容是整个 onedir 目录；
+* 安装包叫 ``wx-ai-assistant-win64-<版本>.zip``，内容是整个 onedir 目录；
 * 安装包上传到 **JYI 工具中心**（``docs/release.md`` 的「上传」一节）；老客户端只认
   GitHub 上同名加 ``.sha256`` 的十六进制哈希，所以过渡期两个都要有；
 * 每个版本还要在工具中心填上**签名清单 + 签名**（``deploy/sign_release.py``
@@ -61,7 +61,7 @@ from . import update_signature as signing
 LOGGER = logging.getLogger(__name__)
 
 #: 默认查这个仓库的 releases。换地方发版就改这里（或调用时传 repo）。
-DEFAULT_REPO = "randomix777/wechat-ai-assistant"
+DEFAULT_REPO = "randomix777/wx-ai-assistant"
 API_LATEST = "https://api.github.com/repos/{repo}/releases/latest"
 
 #: JYI 工具中心（发布口）。客户端从这儿读**签名清单**，也从这儿下包 ——
@@ -73,8 +73,8 @@ JYI_TOOL_SLUG = "wechat-ai-assistant"
 TOOLS_BASE_ENV = "WECHAT_AI_TOOLS_BASE"
 TOOL_SLUG_ENV = "WECHAT_AI_TOOL_SLUG"
 
-#: 安装包名前缀。完整文件名形如 ``wechat-ai-assistant-win64-1.9.9.zip``。
-ASSET_PREFIX = "wechat-ai-assistant-win64-"
+#: 安装包名前缀。完整文件名形如 ``wx-ai-assistant-win64-1.9.9.zip``。
+ASSET_PREFIX = "wx-ai-assistant-win64-"
 PENDING_NAME = "pending.json"
 UPDATES_DIR_NAME = "_updates"
 BACKUP_PREFIX = "_backup-"
@@ -134,7 +134,7 @@ def is_frozen_app() -> bool:
 def _http_get_json(url: str, headers: Mapping[str, str] | None = None) -> Any:
     request_headers = {
         "Accept": "application/vnd.github+json",
-        "User-Agent": "wechat-ai-assistant-updater/1",
+        "User-Agent": "wx-ai-assistant-updater/1",
     }
     request_headers.update(headers or {})
     request = urllib.request.Request(url, headers=request_headers)
@@ -144,7 +144,7 @@ def _http_get_json(url: str, headers: Mapping[str, str] | None = None) -> Any:
 
 def _http_get_bytes(url: str, timeout: float = HTTP_TIMEOUT,
                     headers: Mapping[str, str] | None = None) -> bytes:
-    request_headers = {"User-Agent": "wechat-ai-assistant-updater/1"}
+    request_headers = {"User-Agent": "wx-ai-assistant-updater/1"}
     request_headers.update(headers or {})
     request = urllib.request.Request(url, headers=request_headers)
     with urllib.request.urlopen(request, timeout=timeout) as response:

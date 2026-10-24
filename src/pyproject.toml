@@ -1,11 +1,11 @@
 [project]
-name="wechat-ai-assistant"
+name="wx-ai-assistant"
 version="1.11.18"
 description="Windows WeChat automation and AI merchant assistant"
 readme="README.md"
 license={text="LGPL"}
 authors=[{name="Hello-Mr-Crab", email="3083256475@qq.com"}]
-urls={Homepage="https://github.com/randomix777/wechat-ai-assistant"}
+urls={Homepage="https://github.com/randomix777/wx-ai-assistant"}
 
 keywords=["rpa", "windows", "wechat", "automation"]
 

@@ -63,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
     from .merchant_app import (DEFAULT_GATEWAY, build_runtime, default_data_dir,
                               default_device_name)
 
-    parser = argparse.ArgumentParser(prog="wechat-ai-assistant-dev-web",
+    parser = argparse.ArgumentParser(prog="wx-ai-assistant-dev-web",
                                      description="开发调试用的 Web 界面")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--data-dir", default="")

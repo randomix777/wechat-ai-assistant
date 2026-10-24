@@ -10,7 +10,7 @@
     :: 把打印出来的公钥粘进 src/wechat_ai_assistant/update_signature.py 的 PUBLISHER_PUBKEY
 
     :: 每个版本：签安装包，产出 latest.json + latest.json.sig
-    python deploy/sign_release.py sign wechat-ai-assistant-win64-1.10.0.zip --notes-file notes.md
+    python deploy/sign_release.py sign wx-ai-assistant-win64-1.10.0.zip --notes-file notes.md
 
     签出来的清单里，下载地址默认就是 **JYI 工具中心里这个工具的稳定下载地址**
     （工具中心换版不用重签，客户端会拿清单里的 sha256 把字节对上）。
@@ -26,7 +26,7 @@
     python deploy/sign_release.py export-jwk | wrangler secret put RELEASE_SIGN_JWK
 
     :: 每次发版：让在线签名服务签（本机不需要私钥文件）
-    python deploy/sign_release.py sign wechat-ai-assistant-win64-1.10.0.zip \\
+    python deploy/sign_release.py sign wx-ai-assistant-win64-1.10.0.zip \\
       --remote https://jyisolutions.com/api/internal/release/sign
 
 完整发版流程见 ``docs/release.md``。
@@ -78,7 +78,7 @@ def _tool_download_url() -> str:
 
 
 def _version_from_name(name: str) -> str:
-    """从 ``wechat-ai-assistant-win64-1.10.0.zip`` 里抠出版本号。"""
+    """从 ``wx-ai-assistant-win64-1.10.0.zip`` 里抠出版本号。"""
     stem = Path(name).name
     prefix = updater.ASSET_PREFIX
     if stem.startswith(prefix):
