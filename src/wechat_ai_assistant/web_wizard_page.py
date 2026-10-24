@@ -222,6 +222,12 @@ PAGE = r"""<!DOCTYPE html>
   .analysis-reasoning pre { margin:6px 0 0; max-height:180px; overflow:auto;
                              white-space:pre-wrap; word-break:break-word;
                              font:12px/1.65 inherit; color:#5b6775; }
+  /* 数据与权限说明：默认折起来，商户要看就点开 —— 披露要在一眼能找到的地方，
+     但不能变成每次都横在读取按钮前面的说明墙。 */
+  .disclosure { margin:10px 0 0; padding:6px 10px; border:1px dashed var(--line);
+                border-radius:8px; background:#fbfaf6; }
+  .disclosure summary { font-size:12px; color:var(--muted); }
+  .disclosure p { margin:6px 0 0; font-size:12px; line-height:1.7; color:#5b6775; }
   .analysis-sections { display:flex; flex-direction:column; gap:8px; }
   .analysis-section { border:1px solid var(--line); border-radius:9px;
                       padding:8px 11px; background:#fff; }
@@ -563,6 +569,14 @@ const PAGES = {
             conversationSelectionActionsHtml(rows) + "</div>" +
             '<div id="convlist">' + conversationsHtml(rows) + "</div>" +
             '<p class="hint">只列微信当前能看到的最近会话，不等于全部历史。</p>' +
+            // 明示披露：密钥怎么来的、数据去哪里 —— 折叠块放在读取动作发生的
+            // 这一屏，点开才展开，不挡操作（登录屏保持"只放功能内容"的规矩）。
+            '<details class="disclosure"><summary>数据与权限说明</summary>' +
+            '<p>点「提取密钥」时，本工具会读取微信进程内存，目的是获取本机微信数据库' +
+            '的解密密钥；密钥只保存在你电脑上（Windows 加密存储），不做其他用途。' +
+            '聊天记录从你电脑上的微信本地数据库解密读取，解密结果只留在本机、用完即删。' +
+            '使用「智能整理」时，你所选会话的消息文本（模型支持时含图片）会发送到 JYI 的 ' +
+            'AI 网关用于生成分析；除此之外，本工具不上传你的任何数据。</p></details>' +
             // 范围确认与选择会话同一屏：两个读取按钮的差别要说在这里。
             '<p class="hint">「更新消息」= 上次之后的新消息；「读取全部」= 所选会话全部重读。' +
             "读取时要在本机解密微信的数据库，比较占机器，读完前请稍等（这期间别关微信）。</p>",
@@ -697,7 +711,8 @@ const PAGES = {
               '全部消息（不止新增）交给 AI，按用量计费。只要新增的话，' +
               '回上一步点「更新消息」再整理。</div>';
     }
-    body += '<p class="hint">每个角色各自记进度：同一个角色再跑只分析上次之后的新消息；' +
+    body += '<p class="hint">点「开始整理」会把所选消息的文本（模型支持时含图片）发送给 AI 云网关；' +
+            "每个角色各自记进度：同一个角色再跑只分析上次之后的新消息；" +
             "换角色会把同一批消息重新分析一遍（按用量计费）。一次最多 200 条，" +
             "第一次取最近的一批，之后按进度往后追。</p>";
     if (a) {
